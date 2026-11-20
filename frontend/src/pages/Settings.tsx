@@ -78,7 +78,7 @@ export default function SettingsPage() {
         <div className="card-title">
           <h2>Salesforce Marketing Cloud</h2>
         </div>
-        <div className="row" style={{ marginBottom: '1rem' }}>
+        <div className="row" style={{ marginBottom: '1rem', alignItems: 'stretch' }}>
           {(['mock', 'live'] as const).map((m) => (
             <button key={m} type="button" className={`selectable${form.sfmc_mode === m ? ' selected' : ''}`} style={{ flex: '1 1 220px', width: 'auto' }} onClick={() => set('sfmc_mode', m)}>
               <div className="sel-head">

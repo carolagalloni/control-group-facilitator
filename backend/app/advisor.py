@@ -121,13 +121,14 @@ def _candidates(journey: dict, scope_id: str, activity_key: str | None) -> list[
                      "Implementazione semplice e robusta (un solo Decision Split)"],
             "cons": ["Non dice quale singola comunicazione funziona meglio"],
         }]
-        if first:
-            nxt = next((a for a in acts if a["type"] in MESSAGING and a["key"] != first["key"]), None)
-            if nxt:
+        if first and first["next"]:
+            # holdout subito dopo il primo invio: sull'attività successiva, che raggiunge tutti
+            nxt = next((a for a in acts if a["key"] == first["next"][0]), None)
+            if nxt and nxt["type"] != "EXIT":
                 cands.append({
                     "id": f"pos-{nxt['key']}", "activity_key": nxt["key"],
                     "label": f"Dopo «{first['name']}»",
-                    "description": "Tutti ricevono il primo invio; il controllo salta il resto del journey.",
+                    "description": "Tutti ricevono il primo invio; il controllo esce dal journey subito dopo.",
                     "monthly_volume": nxt["monthly_volume"], "recommended": False,
                     "expected_lift": round(journey["baseline"].get("expected_lift", 0.08) / 2, 3),
                     "pros": ["Misura il valore dei follow-up rispetto al solo primo messaggio",

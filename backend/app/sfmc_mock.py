@@ -191,8 +191,11 @@ class MockSFMC:
         groups = np.where(buckets < round(cg["holdout_pct"] * 100), "CONTROL", "TREATMENT")
         touch = cg["activity_key"]
         if touch:
-            reached = entries["Reach_" + touch].to_numpy()
-            lift = j["true_lift"].get(touch, 0.0)
+            col = "Reach_" + touch
+            # attività non di comunicazione (es. un'attesa dopo il primo invio): la raggiungono tutti
+            reached = entries[col].to_numpy() if col in entries else np.ones(len(entries), dtype=bool)
+            default = j["true_lift"]["journey"] / 2 if cg["scope_id"] == "journey_incrementality" else 0.0
+            lift = j["true_lift"].get(touch, default)
             step = next(a["step"] for a in j["activities"] if a["key"] == touch)
             exp_dates = pd.to_datetime(entries["EntryDate"]) + pd.Timedelta(days=max(step - 1, 0))
             exposure = exp_dates.dt.strftime("%Y-%m-%d").where(reached, None)

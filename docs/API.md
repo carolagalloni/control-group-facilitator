@@ -79,7 +79,7 @@ Res
      "days_to_detect": 210, "opportunity_cost": 2550.0, "detectable": false }],
   "assumptions": { "entrants_in_period": 100000, "revenue_per_contact": 2.55 } }
 ```
-`days_to_detect` può essere `null` (non rilevabile entro 365 giorni). `opportunity_cost` = vendite attese perse nel periodo tenendo fuori il gruppo (stima con `expected_lift`).
+`recommended_pct` è `null` quando il verdetto è "non fattibile". `days_to_detect` può essere `null` (non rilevabile entro 365 giorni). `opportunity_cost` = vendite attese perse nel periodo tenendo fuori il gruppo (stima con `expected_lift`).
 
 ### POST /api/advisor/explain-sizing
 Req `{ "journey_id": "j-welcome", "scope_id": "journey_incrementality", "sizing": <risposta /stats/sizing>, "request": <richiesta /stats/sizing> }`

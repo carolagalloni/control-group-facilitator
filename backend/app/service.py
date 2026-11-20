@@ -62,7 +62,8 @@ def build_control_group(req: dict, journey: dict) -> dict:
                                                   journey["key"], touch),
         "results_sql": sfmc_sql.results_sql(assign_key, sales_key, results_key, req["attribution_days"], touch),
         "journey_change": sfmc_sql.journey_change(journey, activity, assign_key,
-                                                  journey.get("entry_event_key") or "ENTRY_EVENT"),
+                                                  journey.get("entry_event_key") or "ENTRY_EVENT",
+                                                  exit_control=req["scope_id"] == "journey_incrementality"),
         "automation": {
             "name": f"CG_{cid}_Daily",
             "schedule": "Ogni giorno alle 06:00 (prima dell'ingresso nel journey)",

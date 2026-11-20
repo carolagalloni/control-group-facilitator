@@ -153,8 +153,7 @@ export default function Detail() {
               <div className={`banner ${r.status.level}`}>
                 <span className="alert-icon">{r.status.level === 'ok' ? '✓' : '!'}</span>
                 <span className="banner-text">{r.status.message}</span>
-                <span className="spacer" />
-                <span className="small muted" style={{ whiteSpace: 'nowrap' }}>
+                <span className="small muted banner-meta">
                   al {fmtDate(r.as_of)} · giorno {r.days_running} · {r.source}
                 </span>
               </div>

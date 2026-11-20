@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { Artifacts, DeDef } from '../api';
 import { Tabs } from './ui';
 
-export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+export function CodeBlock({ code, lang, wrap }: { code: string; lang?: string; wrap?: boolean }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -19,7 +19,7 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
     setTimeout(() => setCopied(false), 1500);
   };
   return (
-    <div className="code-block">
+    <div className={`code-block${wrap ? ' wrap' : ''}`}>
       <pre aria-label={lang}>
         <code>{code}</code>
       </pre>
@@ -107,7 +107,7 @@ export default function ArtifactsView({ artifacts }: { artifacts: Artifacts }) {
       {tab === 'journey' && (
         <div className="stack">
           <p className="pre-wrap">{description}</p>
-          <CodeBlock code={JSON.stringify(jcRest, null, 2)} lang="JSON" />
+          <CodeBlock code={JSON.stringify(jcRest, null, 2)} lang="JSON" wrap />
         </div>
       )}
       {tab === 'automation' && automation && (

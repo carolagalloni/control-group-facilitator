@@ -112,7 +112,8 @@ FROM (
 GROUP BY c.CG_Group"""
 
 
-def journey_change(journey: dict, activity: dict | None, assign_de: str, entry_event_key: str) -> dict:
+def journey_change(journey: dict, activity: dict | None, assign_de: str, entry_event_key: str,
+                   exit_control: bool = False) -> dict:
     """Descrive (e prepara in JSON) la modifica al journey: Decision Split sul flag CG_Group."""
     field_ref = f'Event.{entry_event_key}."CG_Group"'
     criteria = (
@@ -123,6 +124,8 @@ def journey_change(journey: dict, activity: dict | None, assign_de: str, entry_e
     position = "subito dopo l'ingresso" if activity is None else f"immediatamente prima di «{activity['name']}»"
     control_path = ("verso un'uscita: il gruppo di controllo non riceve nessuna comunicazione del journey"
                     if activity is None else
+                    "verso un'uscita: il gruppo di controllo non riceve le comunicazioni successive"
+                    if exit_control else
                     f"che salta «{activity['name']}» e si ricongiunge al flusso successivo")
     steps = [
         f"Creare una nuova versione di «{journey['name']}» (la versione attiva non viene toccata; "

@@ -57,3 +57,18 @@ def test_external_sql_source():
     assert "database SQL" in res["source"] and res["days_running"] > 0
     bad = client.post("/api/datasources/test", json={"type": "sql", "config": {"dsn": db, "query": "DELETE FROM sales"}})
     assert bad.json()["ok"] is False
+
+
+def test_post_first_email_position_covers_everyone():
+    pos = client.post("/api/advisor/positions",
+                      json={"journey_id": "j-welcome", "scope_id": "journey_incrementality"}).json()
+    alt = next(c for c in pos["candidates"] if c["activity_key"])
+    assert alt["activity_key"] == "WAIT1" and alt["monthly_volume"] == 150000
+    body = {"name": "Dopo prima email", "journey_id": "j-welcome", "scope_id": "journey_incrementality",
+            "activity_key": "WAIT1", "holdout_pct": 0.2, "primary_kpi": "conversion_rate", "attribution_days": 30}
+    cg = client.post("/api/control-groups", json=body).json()
+    assert all(s["status"] != "errore" for s in cg["deploy_log"])
+    assert "uscita" in " ".join(cg["artifacts"]["journey_change"]["steps"])
+    res = client.get(f"/api/control-groups/{cg['id']}/results").json()
+    assert res["days_running"] > 0 and res["srm"]["ok"]
+    client.delete(f"/api/control-groups/{cg['id']}")
