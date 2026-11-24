@@ -13,7 +13,8 @@ class LLMUnavailable(RuntimeError):
 
 
 class LLMClient:
-    def __init__(self, base_url: str, model: str, enabled: bool = True, timeout: float = 120):
+    # 7B su CPU (laptop senza GPU) impiega 40-120 s per risposta: 120 s di timeout causava fallback spuri
+    def __init__(self, base_url: str, model: str, enabled: bool = True, timeout: float = 300):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.enabled = enabled
@@ -34,10 +35,11 @@ class LLMClient:
         self._reach_cache = (time.time(), ok)
         return ok
 
-    def chat(self, system: str, user: str, json_mode: bool = False, temperature: float = 0.2) -> str:
+    def chat(self, system: str, user: str, json_mode: bool = False, temperature: float = 0.2,
+             max_tokens: int = 400) -> str:
         if not self.enabled:
             raise LLMUnavailable("LLM disattivato nelle impostazioni")
-        body = {"model": self.model, "temperature": temperature,
+        body = {"model": self.model, "temperature": temperature, "max_tokens": max_tokens,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
@@ -51,7 +53,7 @@ class LLMClient:
         return r.json()["choices"][0]["message"]["content"].strip()
 
     def chat_json(self, system: str, user: str) -> dict:
-        text = self.chat(system, user, json_mode=True)
+        text = self.chat(system, user, json_mode=True, temperature=0.1)
         return parse_json(text)
 
 

@@ -5,7 +5,6 @@ Le risposte LLM sono sempre validate contro le opzioni ammesse (nessun id/attivi
 """
 from __future__ import annotations
 
-import json
 import re
 
 from . import scopes
@@ -25,6 +24,23 @@ def _fmt_pct(x: float) -> str:
 
 def _n(x: float) -> str:
     return f"{x:,.0f}".replace(",", ".")
+
+
+def _clean(text: str) -> str:
+    """Ripulisce il testo del modello: niente id tecnici, niente frase finale troncata.
+
+    In JSON mode Ollama vincola l'output alla grammatica JSON: se il modello scrive una virgoletta doppia (spesso
+    al posto di «») la stringa si chiude lì e il testo arriva troncato a metà frase. Lo stesso succede quando
+    si raggiunge max_tokens.
+    """
+    text = str(text).strip()
+    for sid in ("journey_incrementality", "touchpoint_value"):
+        text = text.replace(sid, scopes.get(sid)["name"].lower())
+    if text and text[-1] not in ".!?»)":
+        cut = max(text.rfind(". "), text.rfind("! "), text.rfind("? "))
+        if cut > 0:  # senza una frase completa prima, meglio il testo così com'è che niente
+            text = text[:cut + 1]
+    return text
 
 
 # ----------------------------------------------------------------------------- interpret
@@ -58,8 +74,8 @@ def _rules_interpret(question: str, journey: dict) -> dict:
                 "rationale": ("La domanda riguarda la frequenza di contatto, scopo non ancora disponibile: "
                               "un primo passo è misurare l'incrementalità dell'intero journey."),
                 "kpi_suggestion": "revenue_per_contact"}
-    if target is not None and any(w in q for w in ["serve", "utile", "funziona", "vale", "inutile", "togliere",
-                                                   "eliminare", "singol", "specific", "reminder", "solo"]):
+    if target is not None and any(w in q for w in ["serve", "utile", "funziona", "vale", "inutile", "togli",
+                                                   "elimin", "senso", "singol", "specific", "reminder", "solo"]):
         return {"scope_id": "touchpoint_value", "activity_key": target["key"], "confidence": "media",
                 "rationale": f"La domanda riguarda una comunicazione specifica («{target['name']}»): "
                              "serve un holdout immediatamente prima di quell'attività.",
@@ -71,19 +87,43 @@ def _rules_interpret(question: str, journey: dict) -> dict:
 
 
 def interpret(llm: LLMClient, question: str, journey: dict) -> dict:
-    acts = [{"key": a["key"], "nome": a["name"], "tipo": a["type"]} for a in journey["activities"]
+    acts = [{"key": a["key"], "name": a["name"], "type": a["type"]} for a in journey["activities"]
             if a["type"] in MESSAGING]
-    prompt = f"""Domanda di business del cliente: "{question}"
-Journey: {journey['name']}. Attività di comunicazione: {json.dumps(acts, ensure_ascii=False)}
-Scopi disponibili:
-- journey_incrementality: misura il valore dell'intero journey (holdout all'ingresso)
-- touchpoint_value: misura il valore di UNA comunicazione specifica (holdout prima di quella attività)
-Rispondi SOLO con JSON: {{"scope_id": "...", "activity_key": "chiave attività o null",
-"confidence": "alta|media|bassa", "rationale": "max 2 frasi", "kpi_suggestion": "revenue_per_contact|conversion_rate"}}"""
+    # ordine di invio esplicito: senza, «la seconda email» / «l'ultima comunicazione» non vengono risolte
+    def _tag(i: int) -> str:
+        return " - PRIMA comunicazione" if i == 1 else " - ULTIMA comunicazione" if i == len(acts) else ""
+    lines = "\n".join(f"{i}. chiave {a['key']}: «{a['name']}» ({a['type']}){_tag(i)}"
+                      for i, a in enumerate(acts, 1))
+    ex = next((a for a in acts if a["type"] == "SMS"), acts[-1] if acts else None)
+    ex_key, ex_name = (ex["key"], ex["name"]) if ex else ("null", "")
+    # qwen2.5:7b, senza regole ed esempi, classificava quasi tutto come journey_incrementality; con esempi in
+    # forma abbreviata metteva la chiave dell'attività in scope_id. Esempi in JSON completo, uno per caso.
+    prompt = f"""Domanda del cliente: "{question}"
+Journey «{journey['name']}». Comunicazioni, in ordine di invio:
+{lines}
+
+scope_id può valere SOLO "touchpoint_value" oppure "journey_incrementality".
+Caso A, touchpoint_value: la domanda riguarda UNA comunicazione precisa, cioè un canale (SMS, push, notifica,
+email, newsletter), un messaggio citato per nome o per posizione («la seconda email», «l'ultima comunicazione»,
+«il reminder»), o chiede se un invio serve o si può togliere. activity_key = la chiave di quella comunicazione.
+Esempio per "L'SMS serve davvero?":
+{{"scope_id": "touchpoint_value", "activity_key": "{ex_key}", "confidence": "alta", "rationale": "La domanda riguarda solo «{ex_name}»: serve un holdout subito prima di quell'invio.", "kpi_suggestion": "revenue_per_contact"}}
+Caso B, journey_incrementality: la domanda riguarda il journey nel complesso o le sue vendite.
+Esempio per "Il journey porta vendite in più?":
+{{"scope_id": "journey_incrementality", "activity_key": null, "confidence": "alta", "rationale": "La domanda riguarda il valore dell'intero journey: holdout all'ingresso, misurato sulle vendite.", "kpi_suggestion": "revenue_per_contact"}}
+Caso C, SOLO se la domanda parla del valore di tutto il marketing o CRM, oppure di troppe o meno comunicazioni:
+quello scopo non è disponibile. Usa journey_incrementality, activity_key null, confidence "bassa" e scrivi nel
+rationale che lo scopo richiesto non è ancora disponibile e che si parte dall'intero journey.
+kpi_suggestion: "conversion_rate" se la domanda parla di conversioni, altrimenti "revenue_per_contact".
+rationale: 1-2 frasi per un marketing manager, cita le comunicazioni per nome tra «», mai per chiave.
+Rispondi SOLO con il JSON."""
     try:
         r = llm.chat_json(SYSTEM, prompt)
         keys = {a["key"] for a in acts}
         scope_id = r.get("scope_id")
+        if scope_id in keys:  # errore tipico dei modelli piccoli: la chiave dell'attività al posto dello scopo
+            r.setdefault("activity_key", scope_id)
+            scope_id = "touchpoint_value"
         if scope_id not in scopes.ENABLED:
             raise LLMUnavailable("scope non valido")
         ak = r.get("activity_key")
@@ -96,7 +136,7 @@ Rispondi SOLO con JSON: {{"scope_id": "...", "activity_key": "chiave attività o
             ak = None
         return {"scope_id": scope_id, "activity_key": ak,
                 "confidence": r.get("confidence") if r.get("confidence") in ("alta", "media", "bassa") else "media",
-                "rationale": str(r.get("rationale", ""))[:600],
+                "rationale": _clean(r.get("rationale", ""))[:600],
                 "kpi_suggestion": r.get("kpi_suggestion") if r.get("kpi_suggestion") in
                 ("revenue_per_contact", "conversion_rate") else "revenue_per_contact",
                 "source": "llm"}
@@ -149,9 +189,9 @@ def _candidates(journey: dict, scope_id: str, activity_key: str | None) -> list[
             "expected_lift": 0.03,
             "pros": [f"Isola il contributo di «{a['name']}» ({a['type']})",
                      "Il resto del journey resta identico per entrambi i gruppi"],
-            "cons": [f"Raggiunge solo il {_fmt_pct(a['reach_rate'])} degli ingressi "
-                     f"({_n(a['monthly_volume'])} contatti/mese)",
-                     "L'effetto marginale di un singolo invio è tipicamente piccolo (1-5%)"],
+            "cons": ([f"Raggiunge solo il {_fmt_pct(a['reach_rate'])} degli ingressi "
+                      f"({_n(a['monthly_volume'])} contatti/mese)"] if a["reach_rate"] < 1 else []) +
+                    ["L'effetto marginale di un singolo invio è tipicamente piccolo (1-5%)"],
         })
     pick = next((c for c in cands if c["activity_key"] == activity_key), None) or \
         max(cands, key=lambda c: c["monthly_volume"], default=None)
@@ -167,24 +207,41 @@ def positions(llm: LLMClient, journey: dict, scope_id: str, activity_key: str | 
     if not cands:
         return {"candidates": [], "narrative": "Il journey non contiene attività di comunicazione.",
                 "source": "regole"}
-    flow = [f"{a['step']}. {a['name']} ({a['type']}, {a['monthly_volume']} contatti/mese"
-            f"{', ramo: ' + a['branch_label'] if a['branch_label'] else ''})" for a in journey["activities"]]
-    prompt = f"""Journey «{journey['name']}», {journey['monthly_volume']} ingressi/mese, flusso:
-{chr(10).join(flow)}
-Scopo del control group: {scopes.get(scope_id)['name']}.
-Posizioni candidate: {json.dumps([{k: c[k] for k in ('id', 'label', 'monthly_volume')} for c in cands], ensure_ascii=False)}
-Scegli la posizione migliore e spiega in 3-4 frasi perché, citando volumi e rischi
-(es. contaminazione, contatti già in viaggio). Se il cliente ha indicato un'attività ({activity_key}), rispettala
-salvo motivi forti. Rispondi SOLO con JSON: {{"recommended_id": "...", "narrative": "..."}}"""
+    # La scelta della posizione è una regola di design (ingresso per l'intero journey, attività indicata dal
+    # cliente per il touchpoint): lasciata al modello, qwen2.5:7b sceglieva «dopo il primo invio» o un'altra
+    # attività con motivazioni inventate. Il modello argomenta la scelta usando solo pro e contro forniti.
+    scope = scopes.get(scope_id)
+    vol = journey["monthly_volume"]
+
+    def _desc(c: dict) -> str:
+        return (f"«{c['label']}»: {c['description']} Volume: {_n(c['monthly_volume'])} contatti/mese "
+                f"({_fmt_pct(c['monthly_volume'] / vol)} degli ingressi).")
+    if scope_id == "journey_incrementality":
+        # le alternative misurano la stessa cosa in un altro punto: ha senso dire perché non sceglierle
+        alt = "".join(f"\nAlternativa scartata: {_desc(c)} Contro: {'; '.join(c['cons'])}."
+                      for c in cands if c is not rec)
+        ask = "perché questa posizione, cosa misura, il limite principale e perché non l'alternativa"
+    else:
+        # sul touchpoint le altre posizioni misurano altre comunicazioni: confrontarle portava il modello a
+        # inventare motivazioni («raggiunge il 100% quindi l'effetto è troppo piccolo»)
+        alt = ""
+        ask = "cosa misura questa posizione, perché va bene per la domanda del cliente e il limite principale"
+    prompt = f"""Journey «{journey['name']}», {_n(vol)} ingressi/mese.
+Scopo del control group: {scope['name']}. {scope['description']}
+Posizione consigliata (decisa dall'app, non cambiarla): {_desc(rec)}
+Pro: {'; '.join(rec['pros'])}.
+Contro: {'; '.join(rec['cons'])}.{alt}
+Nota tecnica: il gruppo di ogni contatto è calcolato prima dell'ingresso con un hash del SubscriberKey, quindi
+i contatti già in viaggio non vengono toccati e chi rientra resta nello stesso gruppo.
+Scrivi 3-4 frasi per un marketing manager: {ask}. Usa solo i pro, i contro e i volumi indicati, non inventare
+altri rischi. Nel testo non usare virgolette doppie.
+Rispondi SOLO con JSON: {{"recommended_id": "{rec['id']}", "narrative": "..."}}"""
     try:
         r = llm.chat_json(SYSTEM, prompt)
-        ids = {c["id"] for c in cands}
-        rid = r.get("recommended_id")
-        if rid not in ids or not r.get("narrative"):
+        rid = r.get("recommended_id", rec["id"])
+        if rid != rec["id"] or not r.get("narrative"):
             raise LLMUnavailable("risposta non valida")
-        for c in cands:
-            c["recommended"] = c["id"] == rid
-        return {"candidates": cands, "narrative": str(r["narrative"])[:1500], "source": "llm"}
+        return {"candidates": cands, "narrative": _clean(r["narrative"])[:1500], "source": "llm"}
     except (LLMUnavailable, KeyError, TypeError, ValueError):
         return {"candidates": cands, "narrative": rules_text, "source": "regole"}
 
@@ -205,23 +262,81 @@ def _rules_positions_text(journey: dict, scope_id: str, rec: dict | None) -> str
 
 # ----------------------------------------------------------------------------- spiegazioni
 
+def _sizing_alternative(scope_id: str, sizing: dict) -> str | None:
+    """Alternativa concreta decisa dall'app (il modello la spiega, non la sceglie)."""
+    ref = next((o for o in sizing["options"] if o["holdout_pct"] == 0.20), None)
+    if sizing["verdict"] == "al limite":
+        if ref and ref["days_to_detect"]:
+            return (f"allungare il test a circa {ref['days_to_detect']} giorni: così basta un holdout del 20% e si "
+                    "perdono meno vendite")
+        return "allungare il test, così da scendere sotto il 20% di holdout e perdere meno vendite"
+    if sizing["verdict"] != "non fattibile":
+        return None
+    if scope_id == "touchpoint_value":
+        return ("misurare prima l'incrementalità dell'intero journey (holdout all'ingresso), che usa tutto il "
+                "volume e ha un effetto atteso più grande")
+    if ref and ref["days_to_detect"]:
+        return f"allungare il test a circa {ref['days_to_detect']} giorni con un holdout del 20%"
+    return ("non lanciare il test: il volume è troppo basso anche in un anno. Si possono misurare solo effetti "
+            "molto più grandi, oppure unire journey simili per avere più contatti")
+
+
 def explain_sizing(llm: LLMClient, journey: dict, scope_id: str, req: dict, sizing: dict) -> dict:
-    opts = [{k: o[k] for k in ("holdout_pct", "mde_relative", "days_to_detect", "opportunity_cost")}
-            for o in sizing["options"]]
-    prompt = f"""Journey «{journey['name']}», scopo: {scopes.get(scope_id)['name']}.
-Parametri: {json.dumps(req, ensure_ascii=False)}
-Esito motore statistico: verdetto «{sizing['verdict']}», % consigliata {sizing['recommended_pct']}.
-Opzioni: {json.dumps(opts)}
-Spiega a un marketing manager, in 4-5 frasi e senza formule, perché questa % e qual è il compromesso
-tra costo opportunità e tempo per avere una risposta. Se non è fattibile dillo chiaramente e proponi
-un'alternativa concreta (più durata, scopo diverso, KPI diverso). Testo semplice, niente elenchi."""
+    # qwen2.5:7b con le opzioni in JSON grezzo contraddiceva il motore (proponeva un'altra %), inventava effetti
+    # sulla potenza e scriveva «% consigliata zero». Gli passiamo frasi già pronte con i soli numeri da citare.
+    opts = sizing["options"]
+    kpi_name = "tasso di conversione" if req.get("kpi") == "conversion_rate" else "ricavo per contatto"
+    entrants = sizing.get("assumptions", {}).get("entrants_in_period")
+
+    def _opt(o: dict) -> str:
+        days = f"risposta in circa {o['days_to_detect']} giorni" if o["days_to_detect"] else \
+            "nessuna risposta entro un anno"
+        return (f"holdout {_fmt_pct(o['holdout_pct'])}: minimo lift rilevabile {_fmt_pct(o['mde_relative'])}, "
+                f"{days}, costo opportunità circa € {_n(o['opportunity_cost'])}")
+
+    facts = [f"Journey «{journey['name']}», scopo: {scopes.get(scope_id)['name']}.",
+             f"KPI: {kpi_name}. Lift atteso: {_fmt_pct(req['expected_lift'])}. Durata prevista del test: "
+             f"{req['duration_days']} giorni" + (f", {_n(entrants)} contatti attesi." if entrants else ".")]
+    rec = sizing["recommended_pct"]
+    if rec is not None:
+        i = next(i for i, o in enumerate(opts) if o["holdout_pct"] == rec)
+        facts.append(f"Verdetto del motore statistico: «{sizing['verdict']}». Holdout consigliato: "
+                     f"{_fmt_pct(rec)} ({_opt(opts[i])}).")
+        # confronti già orientati: lasciati al modello, invertiva la direzione («il 25% ridurrebbe il costo»)
+        if i > 0:
+            lo = opts[i - 1]
+            slow = f"{lo['days_to_detect']} giorni" if lo["days_to_detect"] else "oltre un anno"
+            facts.append(f"Un holdout più basso ({_fmt_pct(lo['holdout_pct'])}) costerebbe meno "
+                         f"(€ {_n(lo['opportunity_cost'])}) ma darebbe una risposta troppo tardi ({slow}, oltre "
+                         f"i {req['duration_days']} giorni previsti).")
+        if i + 1 < len(opts) and opts[i + 1]["days_to_detect"]:
+            hi = opts[i + 1]
+            facts.append(f"Un holdout più alto ({_fmt_pct(hi['holdout_pct'])}) darebbe una risposta prima "
+                         f"({hi['days_to_detect']} giorni) ma costerebbe di più (€ {_n(hi['opportunity_cost'])}).")
+        if sizing["verdict"] == "al limite":
+            facts.append("«Al limite» significa che il test è fattibile, ma serve un gruppo di controllo grande "
+                         "(oltre il 20%), quindi molte vendite potenzialmente perse.")
+    else:
+        facts.append(f"Verdetto del motore statistico: «non fattibile». Nessuna % di holdout rileva il lift "
+                     f"atteso nella durata prevista: anche con {_opt(opts[-1])}.")
+    alt = _sizing_alternative(scope_id, sizing)
+    if alt:
+        facts.append(f"Alternativa proposta dall'app: {alt}.")
+    prompt = "\n".join(facts) + """
+Spiega a un marketing manager, in 4-5 frasi e senza formule, il verdetto e il compromesso tra costo opportunità
+e tempo per avere una risposta. Inizia dal verdetto, con la stessa parola del motore («fattibile», «al limite»
+o «non fattibile»). Se c'è un'alternativa, proponila con parole tue.
+Regole: usa solo i numeri sopra; non proporre una % diversa da quella consigliata;
+non parlare di potenza statistica, alpha o formule. Testo semplice, niente elenchi."""
     try:
-        return {"narrative": llm.chat(SYSTEM, prompt)[:2000], "source": "llm"}
+        return {"narrative": _clean(llm.chat(SYSTEM, prompt, max_tokens=350))[:2000], "source": "llm"}
     except LLMUnavailable:
         text = sizing["explanation"]
-        if sizing["verdict"] == "non fattibile" and scope_id == "touchpoint_value":
-            text += (" Suggerimento: misura prima l'incrementalità dell'intero journey, che usa tutto il volume "
-                     "e ha un effetto atteso più grande.")
+        if sizing["verdict"] == "non fattibile":
+            # la frase del motore suggerisce «cambia scopo (es. incrementalità dell'intero journey)» anche quando
+            # lo scopo è già quello: qui l'alternativa dipende dallo scopo
+            text = text.split("Neanche in un anno")[0].rstrip()
+            text += f" Suggerimento: {alt}."
         elif sizing["recommended_pct"]:
             text += (" Una % più alta accorcia il test ma aumenta le vendite potenzialmente perse; una % più "
                      "bassa costa meno ma richiede più tempo per una risposta affidabile.")
@@ -229,15 +344,41 @@ un'alternativa concreta (più durata, scopo diverso, KPI diverso). Testo semplic
 
 
 def narrative(llm: LLMClient, cg: dict, results: dict) -> dict:
-    k = [{x: kp[x] for x in ("name", "control", "treatment", "rel_lift", "ci_low", "ci_high", "p_value",
-                             "significant")} for kp in results["kpis"]]
-    prompt = f"""Control group «{cg['name']}» sul journey «{cg['journey_name']}» (holdout {cg['holdout_pct']:.0%},
-attivo da {results['days_running']} giorni). KPI: {json.dumps(k, ensure_ascii=False)}
-SRM ok: {results['srm']['ok']} (p={results['srm']['p_value']}). Ricavo incrementale stimato: {json.dumps(results['incremental_revenue'])}.
-Scrivi un commento per il management in 4-6 frasi: cosa dicono i dati, quanto sono affidabili, cosa fare
-adesso (continuare, fermare, estendere). Non inventare numeri. Testo semplice, niente elenchi."""
+    # Con i KPI in JSON grezzo qwen2.5:7b, per non «inventare numeri», non ne citava nessuno e il prompt lungo
+    # sfiorava il timeout su CPU. Gli passiamo frasi già formattate e la raccomandazione decisa dalle regole.
+    def _kpi(kp: dict) -> str:
+        sig = "statisticamente significativo" if kp["significant"] else "non ancora significativo"
+        return (f"{kp['name']}: lift {_fmt_pct(kp['rel_lift'])} (intervallo di confidenza 95% da "
+                f"{_fmt_pct(kp['ci_low'])} a {_fmt_pct(kp['ci_high'])}), {sig}")
+    kpis = results["kpis"]
+    primary = next((x for x in kpis if x["primary"]), kpis[0])
+    inc = results["incremental_revenue"]
+    srm = results["srm"]
+    srm_txt = ("La divisione tra controllo e trattamento è quella configurata (nessun Sample Ratio Mismatch)."
+               if srm["ok"] else "ATTENZIONE: la divisione tra controllo e trattamento NON è quella configurata "
+               "(Sample Ratio Mismatch): i risultati non sono affidabili.")
+    if not srm["ok"]:
+        action = "sospendere le conclusioni e cercare la causa dello squilibrio (filtri a monte, Decision Split)"
+    elif primary["significant"] and primary["rel_lift"] > 0:
+        action = ("il risultato è solido: si può ridurre il gruppo di controllo per limitare il costo opportunità, "
+                  "mantenendo un holdout minimo per il monitoraggio continuo")
+    elif primary["significant"]:
+        action = "il journey sembra ridurre le vendite: rivedere frequenza, pressione commerciale e contenuti"
+    else:
+        action = "proseguire il test senza modificare la configurazione finché il risultato non è chiaro"
+    others = "; ".join(_kpi(x) for x in kpis if x is not primary)
+    prompt = f"""Control group «{cg['name']}» sul journey «{cg['journey_name']}», holdout {_fmt_pct(cg['holdout_pct'])},
+attivo da {results['days_running']} giorni.
+KPI principale. {_kpi(primary)}.
+Altri KPI: {others or 'nessuno'}.
+Ricavo incrementale stimato: circa € {_n(inc['estimate'])} (intervallo da € {_n(inc['ci_low'])} a € {_n(inc['ci_high'])}).
+{srm_txt}
+Raccomandazione dell'app: {action}.
+Scrivi un commento per il management in 4-6 frasi: cosa dicono i dati (cita il lift del KPI principale con il
+suo intervallo e il ricavo incrementale), quanto sono affidabili, cosa fare adesso seguendo la raccomandazione.
+Usa solo i numeri sopra, scritti come sopra. Testo semplice, niente elenchi."""
     try:
-        return {"narrative": llm.chat(SYSTEM, prompt)[:2500], "source": "llm"}
+        return {"narrative": _clean(llm.chat(SYSTEM, prompt, max_tokens=400))[:2500], "source": "llm"}
     except LLMUnavailable:
         return {"narrative": _rules_narrative(cg, results), "source": "regole"}
 

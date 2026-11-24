@@ -31,7 +31,7 @@ DEFAULT_SETTINGS = {
 
 def load_state() -> dict:
     if STATE_FILE.is_file():
-        st = json.loads(STATE_FILE.read_text())
+        st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     else:
         st = {}
     st.setdefault("settings", {})
@@ -42,7 +42,7 @@ def load_state() -> dict:
 
 def save_state(st: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False))
+    STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # ----------------------------------------------------------------------------- deploy

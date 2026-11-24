@@ -122,4 +122,6 @@ frontend/         React + Vite + TypeScript, grafici SVG senza librerie, funzion
 - Adapter live non testato su una BU reale (vedi sopra).
 - In live, volumi e baseline del journey non arrivano dall'API: il wizard usa default modificabili. Un miglioramento naturale è stimarli da `_JourneyActivity` / `_Sent`.
 - Holdout universale ed effetto frequenza sono visibili nell'interfaccia ma disabilitati.
-- La tenuta dell'LLM in italiano e in JSON dipende dal modello. In sviluppo è stata verificata l'integrazione con un server simulato, non la qualità di un modello reale.
+- La tenuta dell'LLM in italiano e in JSON dipende dal modello. I prompt sono stati verificati con `qwen2.5:7b-instruct` su Ollama, su tutti i passi del wizard e sul commento dei risultati, per i tre journey del mock. Con un 7B le decisioni (posizione dell'holdout, % consigliata, alternativa) restano alle regole dell'app: il modello le spiega soltanto, usando fatti già formattati. Lasciate al modello, le contraddiceva.
+- Su un laptop senza GPU un 7B impiega 40-120 secondi per risposta. Il timeout del client LLM è di 300 secondi.
+- Windows: se la cartella del progetto ha un percorso lungo, `git clone` e `npm install` falliscono (path oltre i 260 caratteri). Clona con `git -c core.longpaths=true clone ...` e tieni il progetto in un percorso corto (es. `C:\dev\`).
