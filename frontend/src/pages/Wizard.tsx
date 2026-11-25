@@ -5,10 +5,10 @@ import {
   ApiError,
   Activity,
   Candidate,
-  ControlGroup,
-  ControlGroupCreate,
   DataSourceTest,
   DataSourceType,
+  Initiative,
+  InitiativeCreate,
   InterpretResponse,
   Journey,
   JourneyDetail,
@@ -23,6 +23,7 @@ import {
 } from '../api';
 import JourneyDiagram, { MESSAGING } from '../components/JourneyDiagram';
 import { MdeChart } from '../components/Charts';
+import JourneyPicker from '../components/JourneyPicker';
 import ArtifactsView, { DeployLog } from '../components/ArtifactsView';
 import { AdvisorBox, Alert, ErrorBox, Loading, SourceBadge, Spinner, Thinking } from '../components/ui';
 import { fmtEur, fmtEur2, fmtInt, fmtLift, fmtPct } from '../format';
@@ -87,12 +88,14 @@ export default function Wizard() {
   const [maxStep, setMaxStep] = useState(0);
 
   // catalogo
-  const [journeys, setJourneys] = useState<Journey[] | null>(null);
   const [scopes, setScopes] = useState<Scope[] | null>(null);
+  const [categories, setCategories] = useState<string[]>([]);
   const [catalogErr, setCatalogErr] = useState<unknown>(null);
 
-  // step 1
-  const [journeyId, setJourneyId] = useState('');
+  // step 1 — uno o più journey (iniziativa); il primo è il riferimento per advisor e dimensionamento
+  const [selected, setSelected] = useState<Journey[]>([]);
+  const journeyId = selected[0]?.id ?? '';
+  const multi = selected.length > 1;
   const [journey, setJourney] = useState<JourneyDetail | null>(null);
   const [journeyErr, setJourneyErr] = useState<unknown>(null);
   const [question, setQuestion] = useState('');
@@ -125,6 +128,9 @@ export default function Wizard() {
   // step 4
   const [name, setName] = useState('');
   const [nameEdited, setNameEdited] = useState(false);
+  const [category, setCategory] = useState('');
+  const [categoryEdited, setCategoryEdited] = useState(false);
+  const [newCategory, setNewCategory] = useState(false);
   const [primaryKpi, setPrimaryKpi] = useState('revenue_per_contact');
   const [kpis, setKpis] = useState<string[]>(['revenue_per_contact', 'conversion_rate', 'orders_per_contact']);
   const [attributionDays, setAttributionDays] = useState('30');
@@ -142,15 +148,14 @@ export default function Wizard() {
   // step 5
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<unknown>(null);
-  const [created, setCreated] = useState<ControlGroup | null>(null);
+  const [created, setCreated] = useState<Initiative | null>(null);
 
   // --- caricamento catalogo
   useEffect(() => {
-    Promise.all([api.journeys(), api.scopes()])
-      .then(([j, s]) => {
-        setJourneys(j);
+    Promise.all([api.scopes(), api.categories().catch(() => [] as string[])])
+      .then(([s, c]) => {
         setScopes(s);
-        if (j.length && !journeyId) setJourneyId(j[0].id);
+        setCategories(c);
         const def = s.find((x) => x.enabled);
         if (def && !scopeId) setScopeId(def.id);
       })
@@ -168,19 +173,35 @@ export default function Wizard() {
 
   // --- dettaglio journey
   useEffect(() => {
-    if (!journeyId) return;
+    setActivityKey(null);
+    if (!journeyId) {
+      setJourney(null);
+      return;
+    }
     setJourney(null);
     setJourneyErr(null);
     api.journey(journeyId).then(setJourney).catch(setJourneyErr);
   }, [journeyId]);
 
+  // più journey: l'unico obiettivo sensato è l'incrementalità del journey (un touchpoint è di un solo journey)
+  useEffect(() => {
+    if (multi && scopeId === 'touchpoint_value') setScopeId('journey_incrementality');
+  }, [multi, scopeId]);
+
+  // categoria proposta dalla cartella SFMC del journey di riferimento
+  useEffect(() => {
+    if (!categoryEdited) setCategory(selected[0]?.folder || '');
+  }, [selected, categoryEdited]);
+
   const scope = scopes?.find((s) => s.id === scopeId);
-  const journeySummary = journeys?.find((j) => j.id === journeyId);
+  const journeySummary = selected[0];
+  const totalVolume = selected.reduce((a, j) => a + j.monthly_volume, 0);
+  const busyJourneys = selected.filter((j) => j.active_control_groups?.length);
   const isTouchpoint = scopeId === 'touchpoint_value';
   const effectiveActivityKey = isTouchpoint ? activityKey : null;
 
   // --- posizioni
-  const posKey = `${journeyId}|${scopeId}|${effectiveActivityKey ?? ''}`;
+  const posKey = `${journeyId}|${scopeId}|${effectiveActivityKey ?? ''}|${multi}`;
   const loadPositions = () => {
     if (!journeyId || !scopeId) return;
     setPosLoading(true);
@@ -188,7 +209,9 @@ export default function Wizard() {
     const k = posKey;
     api
       .positions(journeyId, scopeId, effectiveActivityKey)
-      .then((r) => {
+      .then((r0) => {
+        // su più journey le attività sono diverse: l'holdout va all'ingresso di ognuno
+        const r = multi ? { ...r0, candidates: r0.candidates.filter((c) => !c.activity_key) } : r0;
         setPositions(r);
         setPositionsKey(k);
         const match = r.candidates.find((c) => effectiveActivityKey && c.activity_key === effectiveActivityKey);
@@ -208,12 +231,14 @@ export default function Wizard() {
   // --- prefill sizing
   useEffect(() => {
     if (step !== 2 || !journey || !candidate) return;
-    const k = `${journey.id}|${candidate.id}|${candidate.monthly_volume}`;
+    // iniziativa su più journey: il totale somma i volumi di tutti i journey selezionati
+    const volume = multi ? totalVolume : candidate.monthly_volume;
+    const k = `${journey.id}|${candidate.id}|${volume}`;
     if (k === prefillKey && form) return;
     const sameJourney = prefillKey.startsWith(journey.id + '|') && form;
     const kpiSugg = interp?.kpi_suggestion === 'conversion_rate' ? 'conversion_rate' : 'revenue_per_contact';
     setForm({
-      monthly_volume: String(candidate.monthly_volume),
+      monthly_volume: String(volume),
       baseline_conversion_pct: sameJourney ? form!.baseline_conversion_pct : toStr(journey.baseline.conversion_rate * 100, 3),
       avg_order_value: sameJourney ? form!.avg_order_value : toStr(journey.baseline.avg_order_value, 2),
       expected_lift_pct: toStr((candidate.expected_lift ?? journey.baseline.expected_lift ?? 0.06) * 100, 2),
@@ -225,7 +250,7 @@ export default function Wizard() {
     });
     setPrefillKey(k);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, journey, candidate]);
+  }, [step, journey, candidate, multi, totalVolume]);
 
   // --- sizing debounced
   const reqObj = useMemo(() => (form ? formToRequest(form) : null), [form]);
@@ -261,8 +286,10 @@ export default function Wizard() {
   useEffect(() => {
     if (nameEdited || !journeySummary || holdoutPct === null) return;
     const where = candidate?.activity_key ? ` (${candidate.label})` : '';
-    setName(`${journeySummary.name} – holdout ${Math.round(holdoutPct * 1000) / 10}%${isTouchpoint ? where : ''}`);
-  }, [journeySummary, holdoutPct, nameEdited, candidate, isTouchpoint]);
+    const pct = `holdout ${Math.round(holdoutPct * 1000) / 10}%`;
+    setName(multi ? `${category || 'Iniziativa'} – ${selected.length} journey – ${pct}`
+      : `${journeySummary.name} – ${pct}${isTouchpoint ? where : ''}`);
+  }, [journeySummary, holdoutPct, nameEdited, candidate, isTouchpoint, multi, selected.length, category]);
 
   useEffect(() => {
     const k = form?.kpi ?? interp?.kpi_suggestion;
@@ -346,11 +373,12 @@ export default function Wizard() {
     }
   };
 
-  const payload: ControlGroupCreate | null =
+  const payload: InitiativeCreate | null =
     journeyId && scopeId && candidate && holdoutPct !== null
       ? {
           name: name.trim(),
-          journey_id: journeyId,
+          journey_ids: selected.map((j) => j.id),
+          category: category.trim() || 'Senza categoria',
           scope_id: scopeId,
           activity_key: candidate.activity_key,
           holdout_pct: holdoutPct,
@@ -367,7 +395,7 @@ export default function Wizard() {
     setCreating(true);
     setCreateErr(null);
     try {
-      setCreated(await api.createControlGroup(payload));
+      setCreated(await api.createInitiative(payload));
     } catch (e) {
       setCreateErr(e);
     } finally {
@@ -380,7 +408,7 @@ export default function Wizard() {
     !!journeyId && !!scope && scope.enabled,
     !!candidate && (!isTouchpoint || !!candidate.activity_key),
     holdoutPct !== null && !!sizing,
-    !!name.trim() && kpis.length > 0 && !!dsType && num(attributionDays) > 0,
+    !!name.trim() && !!category.trim() && kpis.length > 0 && !!dsType && num(attributionDays) > 0,
     true,
   ];
   const go = (s: number) => {
@@ -391,7 +419,7 @@ export default function Wizard() {
   };
 
   if (catalogErr) return <ErrorBox error={catalogErr} onRetry={() => window.location.reload()} />;
-  if (!journeys || !scopes) return <Loading text="Caricamento journey e obiettivi…" />;
+  if (!scopes) return <Loading text="Caricamento obiettivi…" />;
 
   const selectedOpt = sizing?.options.find((o) => holdoutPct !== null && Math.abs(o.holdout_pct - holdoutPct) < 1e-9);
   const dsDef = dsTypes?.find((t) => t.type === dsType);
@@ -424,33 +452,31 @@ export default function Wizard() {
       {step === 0 && (
         <div className="stack">
           <div className="card">
-            <h2>1. Scegli il journey</h2>
-            <div className="grid grid-3" style={{ marginTop: '0.75rem' }}>
-              {journeys.map((j) => (
-                <button key={j.id} className={`selectable${j.id === journeyId ? ' selected' : ''}`} onClick={() => { setJourneyId(j.id); setActivityKey(null); }}>
-                  <div className="sel-head">
-                    <h3>{j.name}</h3>
-                    <span className="radio-mark" />
-                  </div>
-                  <p className="mono" style={{ marginBottom: 6 }}>{j.key}</p>
-                  <div className="row small" style={{ gap: '0.35rem 1rem' }}>
-                    <span><strong>{fmtInt(j.monthly_volume)}</strong> <span className="muted">ingressi/mese</span></span>
-                    <span><strong>{fmtPct(j.baseline.conversion_rate)}</strong> <span className="muted">conv.</span></span>
-                    <span><strong>{fmtEur(j.baseline.avg_order_value)}</strong> <span className="muted">scontrino</span></span>
-                  </div>
-                  <div className="row small" style={{ marginTop: 6 }}>
-                    <span className={`badge ${j.status === 'Running' ? 'green' : ''}`}>{j.status}</span>
-                    <span className="muted">{j.activity_count} attività · {j.entry_source}</span>
-                  </div>
-                  {!!j.active_control_groups?.length && (
-                    <div className="alert warning small" style={{ marginTop: 8, padding: '0.45rem 0.6rem' }}>
-                      <span className="alert-icon" style={{ width: 16, height: 16, fontSize: '0.65rem' }}>!</span>
-                      <span className="alert-body">Su questo journey è già attivo «{j.active_control_groups.join('», «')}»: un secondo holdout si sovrapporrebbe</span>
-                    </div>
-                  )}
-                </button>
-              ))}
+            <div className="card-title">
+              <h2 style={{ margin: 0 }}>1. Scegli i customer journey</h2>
+              {multi && <span className="badge blue">Iniziativa su {selected.length} journey · {fmtInt(totalVolume)} ingressi/mese</span>}
             </div>
+            <p className="muted small">
+              Cerca nel catalogo della Business Unit. Puoi selezionarne più di uno per misurare un'iniziativa (es. la stessa campagna su più mercati o segmenti):
+              ogni journey avrà il suo holdout e il monitoraggio mostrerà il dettaglio per journey e il totale.
+            </p>
+            <JourneyPicker selected={selected} onChange={setSelected} multi />
+            {busyJourneys.length > 0 && (
+              <div style={{ marginTop: '0.75rem' }}>
+                <Alert kind="warning" title="Già in test:">
+                  {busyJourneys.map((j) => `«${j.name}» (${j.active_control_groups!.join(', ')})`).join('; ')}. Un secondo holdout si sovrapporrebbe: il deploy verrà rifiutato.
+                </Alert>
+              </div>
+            )}
+            {selected[0] && (
+              <div className="row small" style={{ marginTop: '0.75rem', gap: '0.35rem 1rem' }}>
+                <span className="muted">Riferimento per advisor e dimensionamento:</span>
+                <strong>{selected[0].name}</strong>
+                <span><strong>{fmtPct(selected[0].baseline.conversion_rate)}</strong> <span className="muted">conv.</span></span>
+                <span><strong>{fmtEur(selected[0].baseline.avg_order_value)}</strong> <span className="muted">scontrino</span></span>
+                <span className="muted">{selected[0].activity_count} attività · {selected[0].entry_source}</span>
+              </div>
+            )}
           </div>
 
           <div className="card">
@@ -494,7 +520,7 @@ export default function Wizard() {
             <h2>3. Obiettivo del test</h2>
             <div className="grid grid-2" style={{ marginTop: '0.75rem' }}>
               {scopes.map((s) => (
-                <button key={s.id} className={`selectable${s.id === scopeId ? ' selected' : ''}`} disabled={!s.enabled} onClick={() => setScopeId(s.id)}>
+                <button key={s.id} className={`selectable${s.id === scopeId ? ' selected' : ''}`} disabled={!s.enabled || (multi && s.id === 'touchpoint_value')} onClick={() => setScopeId(s.id)}>
                   <div className="sel-head">
                     <h3>{s.name}</h3>
                     <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
@@ -510,6 +536,9 @@ export default function Wizard() {
                     <span className="badge">Volume richiesto: {s.volume_need}</span>
                   </div>
                   {!s.enabled && s.disabled_reason && <p className="small" style={{ marginTop: 6 }}>{s.disabled_reason}</p>}
+                  {s.enabled && multi && s.id === 'touchpoint_value' && (
+                    <p className="small" style={{ marginTop: 6 }}>Non disponibile con più journey: un touchpoint è un messaggio di un journey specifico.</p>
+                  )}
                 </button>
               ))}
             </div>
@@ -525,6 +554,14 @@ export default function Wizard() {
               <h2>{journey?.name ?? 'Journey'} — dove inserire l'holdout</h2>
               <span className="badge blue">{scope?.name}</span>
             </div>
+            {multi && (
+              <div style={{ marginBottom: '0.75rem' }}>
+                <Alert kind="info">
+                  Iniziativa su {selected.length} journey: l'holdout viene inserito <strong>all'ingresso di ciascun journey</strong>, con la stessa percentuale.
+                  Il diagramma mostra il journey di riferimento.
+                </Alert>
+              </div>
+            )}
             {isTouchpoint && (
               <Alert kind="info">
                 Obiettivo «valore del touchpoint»: clicca sul diagramma il messaggio (email, SMS o push) da valutare.
@@ -763,11 +800,34 @@ export default function Wizard() {
       {step === 3 && (
         <div className="stack">
           <div className="card">
-            <h2>Nome e KPI</h2>
+            <h2>Nome, categoria e KPI</h2>
             <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
               <label className="field" style={{ gridColumn: '1 / -1' }}>
-                Nome del control group
+                {multi ? "Nome dell'iniziativa" : 'Nome del control group'}
                 <input type="text" value={name} onChange={(e) => { setName(e.target.value); setNameEdited(true); }} />
+                {multi && <span className="hint">Ogni journey avrà un holdout chiamato «{name || '…'} · nome del journey».</span>}
+              </label>
+              <label className="field">
+                Categoria
+                {!newCategory ? (
+                  <select
+                    value={category}
+                    onChange={(e) => {
+                      if (e.target.value === '__new__') { setNewCategory(true); setCategory(''); } else setCategory(e.target.value);
+                      setCategoryEdited(true);
+                    }}
+                  >
+                    <option value="" disabled>Scegli una categoria…</option>
+                    {[...new Set([...categories, ...(category ? [category] : [])])].map((c) => <option key={c} value={c}>{c}</option>)}
+                    <option value="__new__">+ Nuova categoria…</option>
+                  </select>
+                ) : (
+                  <div className="row" style={{ flexWrap: 'nowrap' }}>
+                    <input type="text" autoFocus value={category} placeholder="Es. Black Friday" onChange={(e) => { setCategory(e.target.value); setCategoryEdited(true); }} />
+                    <button className="btn sm" onClick={() => setNewCategory(false)}>Elenco</button>
+                  </div>
+                )}
+                <span className="hint">Serve a raggruppare i control group nel monitoraggio per categoria.</span>
               </label>
               <label className="field">
                 KPI primario
@@ -908,10 +968,12 @@ export default function Wizard() {
                 <div>
                   <h3>Obiettivo</h3>
                   <dl className="dl">
-                    <dt>Journey</dt><dd>{journeySummary?.name}</dd>
+                    <dt>{multi ? `Journey (${selected.length})` : 'Journey'}</dt>
+                    <dd>{multi ? <ul className="plain-list">{selected.map((j) => <li key={j.id}>{j.name}</li>)}</ul> : journeySummary?.name}</dd>
+                    <dt>Categoria</dt><dd>{category}</dd>
                     <dt>Obiettivo</dt><dd>{scope?.name}</dd>
                     <dt>Posizione</dt><dd>{candidate?.label}</dd>
-                    <dt>Volume</dt><dd>{fmtInt(candidate?.monthly_volume)} /mese</dd>
+                    <dt>Volume</dt><dd>{fmtInt(multi ? totalVolume : candidate?.monthly_volume)} /mese</dd>
                   </dl>
                 </div>
                 <div>
@@ -941,19 +1003,19 @@ export default function Wizard() {
                   <Alert kind="warning" title="Nota:">il dimensionamento è risultato «{sizing.verdict}». Il test potrebbe non essere conclusivo.</Alert>
                 </div>
               )}
-              {!!journeySummary?.active_control_groups?.length && (
+              {busyJourneys.length > 0 && (
                 <div style={{ marginTop: '1rem' }}>
                   <Alert kind="warning" title="Journey già in test:">
-                    su «{journeySummary.name}» è già attivo «{journeySummary.active_control_groups.join('», «')}». Un secondo holdout si sovrapporrebbe e il deploy verrà rifiutato.
+                    {busyJourneys.map((j) => `su «${j.name}» è già attivo «${j.active_control_groups!.join('», «')}»`).join('; ')}. Un secondo holdout si sovrapporrebbe e il deploy verrà rifiutato.
                   </Alert>
                 </div>
               )}
               {!payload && <div style={{ marginTop: '1rem' }}><Alert kind="error">Configurazione incompleta: torna ai passaggi precedenti.</Alert></div>}
               <div className="row" style={{ marginTop: '1.25rem' }}>
                 <button className="btn primary lg" onClick={create} disabled={!payload || creating || !name.trim()}>
-                  {creating && <Spinner />} Crea in SFMC
+                  {creating && <Spinner />} Crea in SFMC{multi ? ` (${selected.length} journey)` : ''}
                 </button>
-                {creating && <span className="muted">Creazione di Data Extension, query e automation…</span>}
+                {creating && <span className="muted">Creazione di Data Extension, query e automation{multi ? ' per ogni journey' : ''}…</span>}
               </div>
               {!!createErr && (
                 <div style={{ marginTop: '0.75rem' }}>
@@ -971,20 +1033,28 @@ export default function Wizard() {
               <div className="card">
                 <div className="card-title">
                   <div>
-                    <h2>Control group creato</h2>
-                    <div className="muted small">{created.name} · <span className="mono">{created.id}</span> · salt <span className="mono">{created.salt}</span></div>
+                    <h2>{created.journeys.length > 1 ? 'Iniziativa creata' : 'Control group creato'}</h2>
+                    <div className="muted small">{created.name} · {created.category} · {created.journeys.length} journey</div>
                   </div>
-                  <button className="btn primary" onClick={() => navigate(`/cg/${created.id}`)}>Vai al monitoraggio →</button>
+                  <button className="btn primary" onClick={() => navigate(`/iniziativa/${created.id}`)}>Vai al monitoraggio →</button>
                 </div>
-                <h3>Esito del deploy</h3>
-                <DeployLog log={created.deploy_log} />
               </div>
-              <div className="card">
-                <h2>Artefatti SFMC</h2>
-                <ArtifactsView artifacts={created.artifacts} />
-              </div>
+              {(created.control_groups ?? []).map((cg) => (
+                <div className="card" key={cg.id}>
+                  <div className="card-title">
+                    <h3 style={{ margin: 0 }}>{cg.journey_name}</h3>
+                    <span className="muted small"><span className="mono">{cg.id}</span> · salt <span className="mono">{cg.salt}</span></span>
+                  </div>
+                  <h3>Esito del deploy</h3>
+                  <DeployLog log={cg.deploy_log} />
+                  <details className="adv">
+                    <summary>Artefatti SFMC di questo journey</summary>
+                    <ArtifactsView artifacts={cg.artifacts} />
+                  </details>
+                </div>
+              ))}
               <div className="row">
-                <button className="btn primary" onClick={() => navigate(`/cg/${created.id}`)}>Vai al monitoraggio →</button>
+                <button className="btn primary" onClick={() => navigate(`/iniziativa/${created.id}`)}>Vai al monitoraggio →</button>
                 <Link to="/" className="btn">Torna alla dashboard</Link>
               </div>
             </>

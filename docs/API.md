@@ -29,13 +29,40 @@ PUT accetta gli stessi campi (tutti opzionali) più `sfmc_client_secret` (write-
 ```
 id possibili: `journey_incrementality`, `touchpoint_value`, `universal_holdout` (enabled=false), `frequency` (enabled=false).
 
-### GET /api/journeys
+### GET /api/journeys?q=&status=&folder=&channel=&sort=name|volume|modified&page=1&page_size=25
+Ricerca paginata (una BU può avere migliaia di journey: il catalogo non viene mai restituito per intero).
 ```json
-[{ "id": "j-welcome", "key": "Welcome_Journey", "name": "Welcome Journey", "status": "Running",
+{ "items": [{ "id": "j-welcome", "key": "Welcome_Journey", "name": "Welcome Journey", "status": "Running",
    "entry_source": "Data Extension: Welcome_Entry", "monthly_volume": 50000, "activity_count": 9,
+   "folder": "Onboarding", "last_modified": "2026-10-02", "channels": ["email", "push", "sms"],
    "baseline": { "conversion_rate": 0.03, "avg_order_value": 85.0, "expected_lift": 0.10 },
-   "active_control_groups": ["nome CG già attivo"] }]
+   "active_control_groups": ["nome CG già attivo"] }],
+  "total": 2403, "page": 1, "page_size": 25,
+  "facets": { "status": { "Running": 1320 }, "folder": { "Retention": 300 } } }
 ```
+In live `facets` è vuoto e `folder` è null (l'API journey espone solo l'id della cartella).
+
+### GET /api/categories → `["Acquisizione", "Onboarding", ...]`
+
+### POST /api/initiatives
+Come `POST /api/control-groups` ma con `journey_ids: [...]` al posto di `journey_id` e `category`. Crea un holdout per
+journey (tutto o niente: se un journey è già in test risponde 409 senza creare nulla). Con più journey è ammesso solo
+`journey_incrementality`, con l'holdout all'ingresso. Risposta: `Initiative` + `control_groups`.
+
+### GET /api/initiatives → `[Initiative]`
+`{ id, name, category, scope_id, holdout_pct, primary_kpi, kpis, attribution_days, created_at, status, journeys: [{ cg_id, journey_id, journey_name, activity_name, status }] }`
+
+### GET /api/initiatives/{id} · DELETE /api/initiatives/{id} · POST /api/initiatives/{id}/refresh · POST /api/initiatives/{id}/narrative
+
+### GET /api/initiatives/{id}/results
+`{ "total": Results, "members": [{ cg_id, journey_id, journey_name, activity_name, status, results: Results, error }] }`
+— `total` somma gli snapshot dei journey (stessa % di holdout); con un solo journey coincide con il suo risultato.
+
+### GET /api/overview
+`{ "categories": [{ category, initiatives, journeys, control_contacts, treatment_contacts, treatment_revenue,
+incremental_revenue: {estimate, ci_low, ci_high}, revenue_lift, revenue_lift_ci, positive, negative, inconclusive, no_data }],
+"rows": [{ cg_id, initiative_id, initiative_name, category, journey_name, holdout_pct, primary: KpiResult, groups,
+incremental_revenue, srm_ok, status, days_running, error }] }`
 
 ### GET /api/journeys/{id}
 Come sopra più:

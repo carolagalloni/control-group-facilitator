@@ -91,6 +91,33 @@ class LiveSFMC:
             out.append({k: v for k, v in j.items() if k != "activities"})
         return out
 
+    def search_journeys(self, q: str = "", status: str = "", folder: str = "", channel: str = "",
+                        sort: str = "name", page: int = 1, page_size: int = 25) -> dict:
+        """Ricerca lato SFMC (GET /interaction/v1/interactions): con migliaia di journey non si scarica
+        tutto il catalogo, si chiede a Marketing Cloud solo la pagina richiesta."""
+        page_size = max(1, min(page_size, 100))
+        params = {"mostRecentVersionOnly": "true", "extras": "activities", "$page": max(1, page),
+                  "$pageSize": page_size,
+                  "$orderBy": {"name": "name ASC", "modified": "modifiedDate DESC"}.get(sort, "name ASC")}
+        if q:
+            params["nameOrDescription"] = q
+        if status:
+            params["status"] = status
+        data = self._req("GET", "/interaction/v1/interactions", params=params)
+        items = []
+        for it in data.get("items", []):
+            j = self._map_journey(it)
+            self._journeys[j["id"]] = j
+            pub = {k: v for k, v in j.items() if k != "activities"}
+            pub["channels"] = sorted({a["channel"] for a in j["activities"] if a.get("channel")})
+            pub["last_modified"] = (it.get("modifiedDate") or "")[:10] or None
+            pub["folder"] = None
+            items.append(pub)
+        if channel:
+            items = [j for j in items if channel in j["channels"]]
+        return {"items": items, "total": int(data.get("count", len(items))), "page": page,
+                "page_size": page_size, "facets": {}}
+
     def get_journey(self, jid: str) -> dict | None:
         it = self._req("GET", f"/interaction/v1/interactions/{jid}")
         j = self._map_journey(it)

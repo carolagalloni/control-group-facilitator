@@ -3,6 +3,8 @@ import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
 import Wizard from './pages/Wizard';
 import Detail from './pages/Detail';
+import Initiative from './pages/Initiative';
+import Monitoring from './pages/Monitoring';
 import SettingsPage from './pages/Settings';
 
 export default function App() {
@@ -12,7 +14,9 @@ export default function App() {
       <main className="main">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/monitoraggio" element={<Monitoring />} />
           <Route path="/nuovo" element={<Wizard />} />
+          <Route path="/iniziativa/:id" element={<Initiative />} />
           <Route path="/cg/:id" element={<Detail />} />
           <Route path="/impostazioni" element={<SettingsPage />} />
           <Route
@@ -27,6 +31,10 @@ export default function App() {
           />
         </Routes>
       </main>
+      <footer className="app-footer">
+        <span className="footer-mark" aria-hidden />
+        Lutech · Marketing Competence Center — Control Group Facilitator
+      </footer>
     </>
   );
 }

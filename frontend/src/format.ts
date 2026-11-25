@@ -27,6 +27,15 @@ export const fmtDate = (iso: string | null | undefined) => {
   return d.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
+/** Nomi brevi per confronti: toglie la parte iniziale comune a tutti ("Promo – IT", "Promo – DE" → "IT", "DE"). */
+export function shortLabels(names: string[]): string[] {
+  if (names.length < 2) return names;
+  const parts = names.map((n) => n.split(' – '));
+  let k = 0;
+  while (parts.every((p) => p.length > k + 1 && p[k] === parts[0][k])) k++;
+  return parts.map((p) => p.slice(k).join(' – '));
+}
+
 /** Valore KPI con unità */
 export function fmtKpi(v: number, unit: string, id?: string) {
   if (unit === '€') return fmtEur2(v);

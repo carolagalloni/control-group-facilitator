@@ -45,13 +45,21 @@ Qualsiasi server con API **compatibile OpenAI** (`/v1/chat/completions`) funzion
 
 | | **mock** (default) | **live** |
 |---|---|---|
-| Journey | 3 journey di esempio (Welcome, Carrello, Riattivazione) | letti via REST dalla BU |
+| Journey | catalogo di ~2.400 journey (3 curati + sintetici in 8 cartelle), ricerca paginata | ricerca paginata via REST (`GET /interaction/v1/interactions`, `nameOrDescription`, `$page`) |
 | Data Extension | in memoria | create via SOAP, lette via REST |
 | Query Activity | eseguite in Python con la stessa logica della SQL | create via REST e lanciate da «Aggiorna dati» |
 | Decision Split / automation | simulati | **manuali**: l'app genera JSON e passi da seguire |
 | Dati | 75 giorni di test retro-simulati, con un **effetto reale nascosto** | quelli della BU |
 
 Nel mock le vendite sintetiche contengono un lift vero (Welcome +10%, Carrello +12%; SMS reminder solo +2%). La demo mostra che il motore lo **scopre** con il suo intervallo di confidenza, non che lo inventa.
+
+Al primo avvio il mock crea anche tre iniziative di esempio su più journey sintetici (Retention, Cross-sell, Loyalty), così il monitoraggio per categoria non è vuoto. I tre journey curati restano liberi per la demo dal vivo.
+
+### Iniziative, categorie e monitoraggio
+
+- **Iniziativa**: lo stesso control group (obiettivo, % di holdout, KPI) applicato a uno o più customer journey. Nel wizard si selezionano più journey; ognuno riceve il suo holdout (DE, query e automation propri).
+- **Monitoraggio dell'iniziativa** (`/iniziativa/:id`): totale e dettaglio journey per journey, con il confronto tra chi era nel control group e chi ha ricevuto le comunicazioni. Il totale somma gli snapshot dei journey (stessa % di holdout).
+- **Categoria** (Onboarding, Retention, …, proposta dalla cartella SFMC del journey): la pagina **Monitoraggio** riassume ricavo incrementale e lift per categoria. Le % di holdout possono differire tra journey, quindi qui si sommano le stime journey per journey e le loro varianze, non gli snapshot.
 
 ### Collegare una BU reale
 

@@ -95,12 +95,45 @@ class App:
 core = App()
 
 
+DEMO_INITIATIVES = [
+    # (nome, cartella, argomento nel nome, n. journey, holdout)
+    ("Promo stagionale autunno", "Retention", "Promo stagionale", 3, 0.10),
+    ("Cross-sell post-acquisto", "Cross-sell e upsell", "Prodotti complementari", 2, 0.15),
+    ("Programma fedeltà – punti in scadenza", "Loyalty", "Punti in scadenza", 2, 0.10),
+]
+
+
+def _seed_initiatives():
+    """Iniziative di esempio su più journey (solo journey sintetici: i tre curati restano liberi per la demo)."""
+    for name, folder, topic, n, pct in DEMO_INITIATIVES:
+        found = core.sfmc.search_journeys(q=topic, status="Running", folder=folder, sort="volume", page_size=100)
+        picks = [j for j in found["items"] if 8_000 <= j["monthly_volume"] <= 60_000][:n]
+        iid = "in-" + secrets.token_hex(3)
+        for j in picks:
+            jd = core.sfmc.get_journey(j["id"])
+            req = {"name": f"{name} · {jd['name']}", "scope_id": "journey_incrementality", "activity_key": None,
+                   "holdout_pct": pct, "primary_kpi": "revenue_per_contact",
+                   "kpis": ["conversion_rate", "orders_per_contact", "avg_order_value"], "attribution_days": 30,
+                   "data_source": {"type": "sfmc_de", "config": {"sales_de_key": "Sales"}}, "guardrails": {},
+                   "initiative_id": iid, "initiative_name": name, "category": folder}
+            cg = service.build_control_group(req, jd)
+            service.deploy(cg, core.sfmc)
+            core.state["control_groups"].append(cg)
+
+
 def _seed_demo():
-    """Al primo avvio in mock crea un control group di esempio, così la dashboard non è vuota."""
-    if core.sfmc.mode != "mock" or core.state.get("seeded"):
+    """Al primo avvio in mock crea control group e iniziative di esempio, così le dashboard non sono vuote."""
+    if core.sfmc.mode != "mock":
+        return
+    if not core.state.get("seeded_initiatives"):
+        core.state["seeded_initiatives"] = True
+        _seed_initiatives()
+        core._write_samples()
+        core.save()
+    if core.state.get("seeded"):
         return
     core.state["seeded"] = True
-    if not core.state["control_groups"]:
+    if not any(c["journey_id"] == "j-cart" for c in core.state["control_groups"]):
         j = core.sfmc.get_journey("j-cart")
         req = {"name": "Carrello abbandonato – holdout 15%", "scope_id": "journey_incrementality",
                "activity_key": None, "holdout_pct": 0.15, "primary_kpi": "conversion_rate",
@@ -179,6 +212,13 @@ class ControlGroupIn(BaseModel):
     attribution_days: int = Field(default=30, gt=0, le=365)
     data_source: DataSourceIn = DataSourceIn(type="sfmc_de", config={"sales_de_key": "Sales"})
     guardrails: dict = {}
+    category: Optional[str] = None
+
+
+class InitiativeIn(ControlGroupIn):
+    """Un'iniziativa = lo stesso control group applicato a uno o più journey (un holdout per journey)."""
+    journey_id: Optional[str] = None  # type: ignore[assignment]
+    journey_ids: list[str] = Field(min_length=1, max_length=50)
 
 
 # ----------------------------------------------------------------------------- sistema
@@ -227,11 +267,22 @@ def _with_active(j: dict) -> dict:
 
 
 @api.get("/api/journeys")
-def list_journeys():
+def list_journeys(q: str = "", status: str = "", folder: str = "", channel: str = "", sort: str = "name",
+                  page: int = 1, page_size: int = 25):
+    """Ricerca paginata: una BU può avere migliaia di journey, non si restituisce mai tutto il catalogo."""
     try:
-        return [_with_active(j) for j in core.sfmc.list_journeys()]
+        out = core.sfmc.search_journeys(q=q.strip(), status=status, folder=folder, channel=channel, sort=sort,
+                                        page=page, page_size=page_size)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Errore SFMC: {e}") from e
+    out["items"] = [_with_active(j) for j in out["items"]]
+    return out
+
+
+@api.get("/api/categories")
+def get_categories():
+    used = {c["category"] for c in core.state["control_groups"]}
+    return [*service.CATEGORIES, *sorted(used - set(service.CATEGORIES))]
 
 
 @api.get("/api/journeys/{jid}")
@@ -276,31 +327,38 @@ def explain_sizing(body: ExplainIn):
 
 # ----------------------------------------------------------------------------- control group
 
-@api.post("/api/control-groups")
-def create_cg(body: ControlGroupIn):
-    _check_scope(body.scope_id)
-    journey = core.journey(body.journey_id)
-    if body.scope_id == "touchpoint_value":
-        if not body.activity_key:
-            raise HTTPException(400, "Per il valore di un touchpoint serve l'attività su cui applicare l'holdout")
-    if body.activity_key and not any(a["key"] == body.activity_key for a in journey["activities"]):
-        raise HTTPException(400, "Attività non presente nel journey")
+def _validate(journey: dict, scope_id: str, activity_key: str | None):
+    if scope_id == "touchpoint_value" and not activity_key:
+        raise HTTPException(400, "Per il valore di un touchpoint serve l'attività su cui applicare l'holdout")
+    if activity_key and not any(a["key"] == activity_key for a in journey["activities"]):
+        raise HTTPException(400, f"Attività non presente nel journey «{journey['name']}»")
     clash = next((c for c in core.state["control_groups"] if c["journey_id"] == journey["id"]
-                  and (c["scope_id"] == "journey_incrementality" or body.scope_id == "journey_incrementality"
-                       or c["activity_key"] == body.activity_key)), None)
+                  and (c["scope_id"] == "journey_incrementality" or scope_id == "journey_incrementality"
+                       or c["activity_key"] == activity_key)), None)
     if clash:
         raise HTTPException(409, (
             f"Sul journey «{journey['name']}» è già attivo il control group «{clash['name']}». Due holdout "
             "sovrapposti sugli stessi contatti si contaminano a vicenda e falsano il lift: elimina o concludi "
             "quello esistente prima di crearne uno nuovo."))
-    req = body.model_dump()
+
+
+def _deploy(req: dict, journey: dict) -> dict:
+    cg = service.build_control_group(req, journey)
+    siblings = [c for c in core.state["control_groups"] if c["journey_id"] == journey["id"]]
+    service.deploy(cg, core.sfmc, siblings)
+    if any(s["status"] == "errore" for s in cg["deploy_log"]):
+        cg["status"] = "errore deploy"
+    core.state["control_groups"].append(cg)
+    return cg
+
+
+@api.post("/api/control-groups")
+def create_cg(body: ControlGroupIn):
+    _check_scope(body.scope_id)
+    journey = core.journey(body.journey_id)
+    _validate(journey, body.scope_id, body.activity_key)
     with core.lock:
-        cg = service.build_control_group(req, journey)
-        siblings = [c for c in core.state["control_groups"] if c["journey_id"] == journey["id"]]
-        service.deploy(cg, core.sfmc, siblings)
-        if any(s["status"] == "errore" for s in cg["deploy_log"]):
-            cg["status"] = "errore deploy"
-        core.state["control_groups"].append(cg)
+        cg = _deploy(body.model_dump(), journey)
         core.save()
         if core.sfmc.mode == "mock":
             core._write_samples()
@@ -317,18 +375,115 @@ def get_cg(cid: str):
     return core.cg(cid)
 
 
-@api.delete("/api/control-groups/{cid}")
-def delete_cg(cid: str):
+def _remove(cgs: list[dict]):
     with core.lock:
-        cg = core.cg(cid)
-        core.state["control_groups"].remove(cg)
+        for cg in cgs:
+            core.state["control_groups"].remove(cg)
         core.save()
         if core.sfmc.mode == "mock":
-            j = service.internal_journey(cg["journey_id"])
-            if j is not None:
-                core.sfmc.simulate_journey(j, [c for c in core.state["control_groups"]
-                                               if c["journey_id"] == j["id"]])
+            for jid in {cg["journey_id"] for cg in cgs}:
+                j = service.internal_journey(jid)
+                if j is not None:
+                    core.sfmc.simulate_journey(j, [c for c in core.state["control_groups"]
+                                                   if c["journey_id"] == jid])
+
+
+@api.delete("/api/control-groups/{cid}")
+def delete_cg(cid: str):
+    _remove([core.cg(cid)])
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------- iniziative
+
+def _initiative(iid: str) -> list[dict]:
+    cgs = [c for c in core.state["control_groups"] if c["initiative_id"] == iid]
+    if not cgs:
+        raise HTTPException(404, "Iniziativa non trovata")
+    return cgs
+
+
+def _initiative_summary(cgs: list[dict]) -> dict:
+    c0 = cgs[0]
+    status = "errore deploy" if any(c["status"] == "errore deploy" for c in cgs) else c0["status"]
+    return {"id": c0["initiative_id"], "name": c0["initiative_name"], "category": c0["category"],
+            "scope_id": c0["scope_id"], "holdout_pct": c0["holdout_pct"], "primary_kpi": c0["primary_kpi"],
+            "kpis": c0["kpis"], "attribution_days": c0["attribution_days"], "created_at": c0["created_at"],
+            "status": status,
+            "journeys": [{"cg_id": c["id"], "journey_id": c["journey_id"], "journey_name": c["journey_name"],
+                          "activity_name": c.get("activity_name"), "status": c["status"]} for c in cgs]}
+
+
+@api.post("/api/initiatives")
+def create_initiative(body: InitiativeIn):
+    _check_scope(body.scope_id)
+    ids = list(dict.fromkeys(body.journey_ids))
+    if len(ids) > 1 and body.scope_id != "journey_incrementality":
+        raise HTTPException(400, "Più journey nella stessa iniziativa solo per l'incrementalità del journey: "
+                                 "il valore di un touchpoint riguarda un messaggio di un journey specifico.")
+    journeys = [core.journey(j) for j in ids]
+    activity = body.activity_key if len(ids) == 1 else None
+    for j in journeys:  # tutto validato prima di toccare SFMC: o si crea tutto o niente
+        _validate(j, body.scope_id, activity)
+    iid = "in-" + secrets.token_hex(3)
+    out = []
+    with core.lock:
+        for j in journeys:
+            req = {**body.model_dump(exclude={"journey_ids"}), "journey_id": j["id"], "activity_key": activity,
+                   "initiative_id": iid, "initiative_name": body.name,
+                   "name": body.name if len(journeys) == 1 else f"{body.name} · {j['name']}"}
+            out.append(_deploy(req, j))
+        core.save()
+        if core.sfmc.mode == "mock":
+            core._write_samples()
+    return {**_initiative_summary(out), "control_groups": out}
+
+
+@api.get("/api/initiatives")
+def list_initiatives():
+    groups: dict[str, list[dict]] = {}
+    for c in core.state["control_groups"]:
+        groups.setdefault(c["initiative_id"], []).append(c)
+    return [_initiative_summary(g) for g in groups.values()]
+
+
+@api.get("/api/initiatives/{iid}")
+def get_initiative(iid: str):
+    cgs = _initiative(iid)
+    return {**_initiative_summary(cgs), "control_groups": cgs}
+
+
+@api.get("/api/initiatives/{iid}/results")
+def initiative_results(iid: str):
+    return service.initiative_results(_initiative(iid), core.sfmc)
+
+
+@api.post("/api/initiatives/{iid}/refresh")
+def initiative_refresh(iid: str):
+    for cg in _initiative(iid):
+        refresh(cg["id"])
+    return initiative_results(iid)
+
+
+@api.post("/api/initiatives/{iid}/narrative")
+def initiative_narrative(iid: str):
+    cgs = _initiative(iid)
+    res = service.initiative_results(cgs, core.sfmc)["total"]
+    if not res or not res["kpis"]:
+        return {"narrative": res["status"]["message"] if res else "Nessun dato disponibile.", "source": "regole"}
+    names = ", ".join(c["journey_name"] for c in cgs)
+    return advisor.narrative(core.llm, {**cgs[0], "name": cgs[0]["initiative_name"], "journey_name": names}, res)
+
+
+@api.delete("/api/initiatives/{iid}")
+def delete_initiative(iid: str):
+    _remove(_initiative(iid))
+    return {"ok": True}
+
+
+@api.get("/api/overview")
+def get_overview():
+    return service.overview(core.state["control_groups"], core.sfmc)
 
 
 def _results(cg: dict) -> dict:
@@ -417,6 +572,15 @@ def sample_csv():
 
 
 # ----------------------------------------------------------------------------- frontend
+
+@api.middleware("http")
+async def _no_cache_html(request, call_next):
+    """index.html sempre rivalidato: dopo un aggiornamento il browser non resta sulla versione vecchia."""
+    resp = await call_next(request)
+    if resp.headers.get("content-type", "").startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
 
 if FRONTEND_DIST.is_dir():
     api.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

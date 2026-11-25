@@ -48,6 +48,27 @@ export interface Journey {
   activity_count: number;
   baseline: Baseline;
   active_control_groups?: string[];
+  folder?: string | null;
+  last_modified?: string | null;
+  channels?: string[];
+}
+
+export interface JourneyQuery {
+  q?: string;
+  status?: string;
+  folder?: string;
+  channel?: string;
+  sort?: 'name' | 'volume' | 'modified' | string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface JourneyPage {
+  items: Journey[];
+  total: number;
+  page: number;
+  page_size: number;
+  facets: { status?: Record<string, number>; folder?: Record<string, number> };
 }
 
 export interface Activity {
@@ -137,6 +158,12 @@ export interface ControlGroupCreate {
   attribution_days: number;
   data_source: DataSource;
   guardrails: Guardrails;
+  category?: string;
+}
+
+export interface InitiativeCreate extends Omit<ControlGroupCreate, 'journey_id'> {
+  journey_ids: string[];
+  category: string;
 }
 
 export interface DeField { name: string; type: string; pk?: boolean; [k: string]: unknown }
@@ -163,7 +190,82 @@ export interface ControlGroup extends ControlGroupCreate {
   created_at: string;
   artifacts: Artifacts;
   deploy_log: DeployStep[];
+  initiative_id: string;
+  initiative_name: string;
+  category: string;
 }
+
+export interface InitiativeJourney {
+  cg_id: string;
+  journey_id: string;
+  journey_name: string;
+  activity_name: string | null;
+  status: string;
+}
+
+export interface Initiative {
+  id: string;
+  name: string;
+  category: string;
+  scope_id: string;
+  holdout_pct: number;
+  primary_kpi: string;
+  kpis: string[];
+  attribution_days: number;
+  created_at: string;
+  status: string;
+  journeys: InitiativeJourney[];
+  control_groups?: ControlGroup[];
+}
+
+export interface MemberResults extends InitiativeJourney {
+  results: Results | null;
+  error: string | null;
+}
+
+export interface InitiativeResults {
+  total: Results | null;
+  members: MemberResults[];
+}
+
+export interface Interval { estimate: number; ci_low: number; ci_high: number }
+
+export interface OverviewRow {
+  cg_id: string;
+  initiative_id: string;
+  initiative_name: string;
+  category: string;
+  journey_id: string;
+  journey_name: string;
+  activity_name: string | null;
+  scope_id: string;
+  holdout_pct: number;
+  error: string | null;
+  primary: KpiResult | null;
+  groups: { control: GroupStats; treatment: GroupStats } | null;
+  incremental_revenue: Interval | null;
+  srm_ok: boolean | null;
+  status: { level: string; message: string } | null;
+  days_running: number;
+}
+
+export interface CategorySummary {
+  category: string;
+  initiatives: number;
+  journeys: number;
+  control_contacts: number;
+  treatment_contacts: number;
+  treatment_revenue: number;
+  incremental_revenue: Interval;
+  revenue_lift: number | null;
+  revenue_lift_ci: [number, number] | null;
+  positive: number;
+  negative: number;
+  inconclusive: number;
+  no_data: number;
+}
+
+export interface Overview { categories: CategorySummary[]; rows: OverviewRow[] }
 
 export interface GroupStats { contacts: number; converters: number; orders: number; revenue: number }
 
@@ -288,7 +390,20 @@ export const api = {
   getSettings: () => request<Settings>('GET', '/settings'),
   putSettings: (s: SettingsUpdate) => request<Settings>('PUT', '/settings', s),
   scopes: () => request<Scope[]>('GET', '/scopes'),
-  journeys: () => request<Journey[]>('GET', '/journeys'),
+  journeys: (q: JourneyQuery = {}) => {
+    const p = new URLSearchParams();
+    Object.entries(q).forEach(([k, v]) => v !== undefined && v !== '' && p.set(k, String(v)));
+    return request<JourneyPage>('GET', `/journeys?${p.toString()}`);
+  },
+  categories: () => request<string[]>('GET', '/categories'),
+  createInitiative: (b: InitiativeCreate) => request<Initiative>('POST', '/initiatives', b),
+  initiatives: () => request<Initiative[]>('GET', '/initiatives'),
+  initiative: (id: string) => request<Initiative>('GET', `/initiatives/${encodeURIComponent(id)}`),
+  initiativeResults: (id: string) => request<InitiativeResults>('GET', `/initiatives/${encodeURIComponent(id)}/results`),
+  initiativeRefresh: (id: string) => request<InitiativeResults>('POST', `/initiatives/${encodeURIComponent(id)}/refresh`),
+  initiativeNarrative: (id: string) => request<NarrativeResponse>('POST', `/initiatives/${encodeURIComponent(id)}/narrative`),
+  deleteInitiative: (id: string) => request<{ ok: boolean }>('DELETE', `/initiatives/${encodeURIComponent(id)}`),
+  overview: () => request<Overview>('GET', '/overview'),
   journey: (id: string) => request<JourneyDetail>('GET', `/journeys/${encodeURIComponent(id)}`),
   interpret: (question: string, journey_id: string) =>
     request<InterpretResponse>('POST', '/advisor/interpret', { question, journey_id }),

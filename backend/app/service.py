@@ -37,7 +37,24 @@ def load_state() -> dict:
     st.setdefault("settings", {})
     st["settings"] = {**DEFAULT_SETTINGS, **st["settings"]}
     st.setdefault("control_groups", [])
+    for cg in st["control_groups"]:
+        normalize(cg)
     return st
+
+
+CATEGORIES = ["Acquisizione", "Onboarding", "Carrello e conversione", "Cross-sell e upsell", "Retention",
+              "Riattivazione", "Loyalty", "Transazionale"]
+NO_CATEGORY = "Senza categoria"
+
+
+def normalize(cg: dict) -> dict:
+    """Control group salvati prima di iniziative e categorie: ognuno diventa un'iniziativa di un journey."""
+    cg.setdefault("initiative_id", "in-" + cg["id"].removeprefix("cg-"))
+    cg.setdefault("initiative_name", cg["name"])
+    if not cg.get("category"):
+        j = internal_journey(cg["journey_id"])
+        cg["category"] = (j or {}).get("folder") or NO_CATEGORY
+    return cg
 
 
 def save_state(st: dict) -> None:
@@ -79,6 +96,9 @@ def build_control_group(req: dict, journey: dict) -> dict:
     }
     return {
         "id": f"cg-{cid}", "name": req["name"], "journey_id": journey["id"], "journey_name": journey["name"],
+        "initiative_id": req.get("initiative_id") or f"in-{cid}",
+        "initiative_name": req.get("initiative_name") or req["name"],
+        "category": req.get("category") or journey.get("folder") or NO_CATEGORY,
         "scope_id": req["scope_id"], "activity_key": activity["key"] if activity else None,
         "activity_name": activity["name"] if activity else None,
         "holdout_pct": req["holdout_pct"], "primary_kpi": req["primary_kpi"],
@@ -216,6 +236,111 @@ def analyze(cg: dict, snaps: pd.DataFrame, source: str) -> dict:
             "groups": {"control": {k: c[k] for k in ("contacts", "converters", "orders", "revenue")},
                        "treatment": {k: t[k] for k in ("contacts", "converters", "orders", "revenue")}},
             "kpis": kpis, "srm": srm, "incremental_revenue": inc, "timeseries": timeseries, "status": status}
+
+
+def results_for(cg: dict, sfmc) -> tuple[dict | None, pd.DataFrame | None, str | None]:
+    """Risultati di un singolo journey; gli errori di sorgente non bloccano le viste aggregate."""
+    try:
+        snaps, source = load_snapshots(cg, sfmc)
+        return analyze(cg, snaps, source), snaps, None
+    except Exception as e:  # noqa: BLE001
+        return None, None, str(e)
+
+
+def pool_snapshots(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Somma gli snapshot di più journey con la stessa % di holdout (stesse statistiche sufficienti).
+    Si tengono solo le date presenti in tutti, così l'ultimo snapshot include ogni journey."""
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=engine.SNAPSHOT_COLS)
+    cols = engine.SNAPSHOT_COLS[2:]
+    norm = []
+    for f in frames:
+        f = f.copy()
+        f["SnapshotDate"] = pd.to_datetime(f["SnapshotDate"]).dt.date
+        for c in cols:
+            f[c] = pd.to_numeric(f[c], errors="coerce").fillna(0)
+        norm.append(f)
+    last = min(f["SnapshotDate"].max() for f in norm)
+    df = pd.concat(norm, ignore_index=True)
+    df = df[df["SnapshotDate"] <= last]
+    return df.groupby(["SnapshotDate", "CG_Group"], as_index=False)[cols].sum()[engine.SNAPSHOT_COLS]
+
+
+def _member(cg: dict, res: dict | None, err: str | None) -> dict:
+    return {"cg_id": cg["id"], "journey_id": cg["journey_id"], "journey_name": cg["journey_name"],
+            "activity_name": cg.get("activity_name"), "status": cg["status"], "results": res, "error": err}
+
+
+def initiative_results(cgs: list[dict], sfmc) -> dict:
+    """Monitoraggio di un'iniziativa: un blocco per ogni journey + il totale (snapshot sommati)."""
+    members, frames = [], []
+    for cg in cgs:
+        res, snaps, err = results_for(cg, sfmc)
+        members.append(_member(cg, res, err))
+        if snaps is not None:
+            frames.append(snaps)
+    if len(cgs) == 1:
+        total = members[0]["results"]
+    else:
+        total = analyze(cgs[0], pool_snapshots(frames), f"Totale di {len(frames)} journey (snapshot sommati)")
+    return {"total": total, "members": members}
+
+
+def _row(cg: dict, res: dict | None, err: str | None) -> dict:
+    row = {"cg_id": cg["id"], "initiative_id": cg["initiative_id"], "initiative_name": cg["initiative_name"],
+           "category": cg["category"], "journey_id": cg["journey_id"], "journey_name": cg["journey_name"],
+           "activity_name": cg.get("activity_name"), "scope_id": cg["scope_id"], "holdout_pct": cg["holdout_pct"],
+           "error": err, "primary": None, "groups": None, "incremental_revenue": None, "srm_ok": None,
+           "status": None, "days_running": 0}
+    if res and res["kpis"]:
+        row.update(primary=next(k for k in res["kpis"] if k["primary"]), groups=res["groups"],
+                   incremental_revenue=res["incremental_revenue"], srm_ok=res["srm"]["ok"],
+                   status=res["status"], days_running=res["days_running"])
+    elif res:
+        row["status"] = res["status"]
+    return row
+
+
+def overview(cgs: list[dict], sfmc) -> dict:
+    """Vista per categoria: una riga per journey e i totali di categoria.
+    Le % di holdout possono differire tra journey, quindi non si sommano gli snapshot: si somma il
+    ricavo incrementale (stimato journey per journey) e la sua varianza."""
+    rows = [_row(cg, *results_for(cg, sfmc)[::2]) for cg in cgs]
+    cats: dict[str, dict] = {}
+    for r in rows:
+        c = cats.setdefault(r["category"], {"category": r["category"], "initiatives": set(), "journeys": 0,
+                                            "control_contacts": 0, "treatment_contacts": 0, "treatment_revenue": 0.0,
+                                            "inc": 0.0, "var": 0.0, "positive": 0, "negative": 0, "inconclusive": 0,
+                                            "no_data": 0})
+        c["initiatives"].add(r["initiative_id"])
+        c["journeys"] += 1
+        if not r["primary"]:
+            c["no_data"] += 1
+            continue
+        c["control_contacts"] += r["groups"]["control"]["contacts"]
+        c["treatment_contacts"] += r["groups"]["treatment"]["contacts"]
+        c["treatment_revenue"] += r["groups"]["treatment"]["revenue"]
+        inc = r["incremental_revenue"]
+        c["inc"] += inc["estimate"]
+        c["var"] += ((inc["ci_high"] - inc["ci_low"]) / (2 * 1.96)) ** 2
+        p = r["primary"]
+        c["positive" if p["significant"] and p["rel_lift"] > 0 else
+          "negative" if p["significant"] else "inconclusive"] += 1
+    out = []
+    for c in cats.values():
+        half = 1.96 * c.pop("var") ** 0.5
+        inc = c.pop("inc")
+        base = c["treatment_revenue"] - inc  # ricavo che i trattati avrebbero fatto senza le comunicazioni
+        c["initiatives"] = len(c["initiatives"])
+        c["incremental_revenue"] = {"estimate": round(inc, 2), "ci_low": round(inc - half, 2),
+                                    "ci_high": round(inc + half, 2)}
+        c["revenue_lift"] = round(inc / base, 5) if base > 0 else None
+        c["revenue_lift_ci"] = ([round((inc - half) / base, 5), round((inc + half) / base, 5)]
+                                if base > 0 else None)
+        out.append(c)
+    out.sort(key=lambda c: -c["incremental_revenue"]["estimate"])
+    return {"categories": out, "rows": rows}
 
 
 def make_sfmc(settings: dict):

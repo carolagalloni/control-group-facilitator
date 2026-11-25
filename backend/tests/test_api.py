@@ -59,6 +59,42 @@ def test_external_sql_source():
     assert bad.json()["ok"] is False
 
 
+def test_journey_search_is_paginated_and_filtered():
+    r = client.get("/api/journeys", params={"page_size": 10}).json()
+    assert r["total"] > 2000 and len(r["items"]) == 10 and r["facets"]["folder"]
+    r = client.get("/api/journeys", params={"q": "carrello abbandonato", "status": "Running"}).json()
+    assert r["items"] and all("carrello abbandonato" in j["name"].lower() and j["status"] == "Running"
+                              for j in r["items"])
+    r = client.get("/api/journeys", params={"q": "welcome"}).json()
+    assert r["items"][0]["id"] == "j-welcome"
+    r = client.get("/api/journeys", params={"folder": "Loyalty", "channel": "sms", "page": 2, "page_size": 5}).json()
+    assert r["page"] == 2 and all(j["folder"] == "Loyalty" and "sms" in j["channels"] for j in r["items"])
+
+
+def test_initiative_on_many_journeys_split_by_journey():
+    found = client.get("/api/journeys", params={"q": "post-acquisto", "folder": "Retention", "status": "Running",
+                                               "sort": "volume"}).json()["items"]
+    free = [j["id"] for j in found if not j["active_control_groups"] and 5000 < j["monthly_volume"] < 60000][:2]
+    body = {"name": "Post-acquisto multi", "journey_ids": free, "scope_id": "journey_incrementality",
+            "holdout_pct": 0.2, "primary_kpi": "conversion_rate", "category": "Retention", "attribution_days": 30}
+    ini = client.post("/api/initiatives", json=body).json()
+    assert len(ini["journeys"]) == 2 and ini["category"] == "Retention"
+    res = client.get(f"/api/initiatives/{ini['id']}/results").json()
+    assert len(res["members"]) == 2 and all(m["results"]["days_running"] > 0 for m in res["members"])
+    tot = res["total"]["groups"]["control"]["contacts"]
+    assert tot == sum(m["results"]["groups"]["control"]["contacts"] for m in res["members"])
+    assert res["total"]["srm"]["ok"]
+    assert client.post("/api/initiatives", json=body).status_code == 409  # stessi journey già in test
+    tp = {**body, "scope_id": "touchpoint_value", "activity_key": "EMAIL1"}
+    assert client.post("/api/initiatives", json=tp).status_code == 400  # touchpoint solo su un journey
+    ov = client.get("/api/overview").json()
+    cat = next(c for c in ov["categories"] if c["category"] == "Retention")
+    assert cat["journeys"] >= 2 and cat["incremental_revenue"]["ci_low"] <= cat["incremental_revenue"]["estimate"]
+    assert {r["cg_id"] for r in ov["rows"]} >= {j["cg_id"] for j in ini["journeys"]}
+    assert client.delete(f"/api/initiatives/{ini['id']}").json()["ok"]
+    assert client.get(f"/api/initiatives/{ini['id']}").status_code == 404
+
+
 def test_post_first_email_position_covers_everyone():
     pos = client.post("/api/advisor/positions",
                       json={"journey_id": "j-welcome", "scope_id": "journey_incrementality"}).json()
