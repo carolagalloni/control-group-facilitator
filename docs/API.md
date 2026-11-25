@@ -42,6 +42,12 @@ Ricerca paginata (una BU può avere migliaia di journey: il catalogo non viene m
 ```
 In live `facets` è vuoto e `folder` è null (l'API journey espone solo l'id della cartella).
 
+### POST /api/journeys/manual (solo modalità `file`)
+`{ name, key?, entry_de, monthly_volume, conversion_rate, avg_order_value, expected_lift?, messages: [..], folder? }` → `JourneyDetail`
+
+### POST /api/control-groups/{id}/export (solo modalità `file`, multipart `file`)
+Salva l'export della DE che l'app legge (risultati, o assegnazione con vendite esterne) e restituisce `Results`.
+
 ### GET /api/categories → `["Acquisizione", "Onboarding", ...]`
 
 ### POST /api/initiatives

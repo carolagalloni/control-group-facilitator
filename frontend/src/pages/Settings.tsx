@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react';
 import { api, Settings, SettingsUpdate } from '../api';
 import { Alert, ErrorBox, Loading, Spinner, useLoad } from '../components/ui';
 
+const MODES = [
+  { id: 'mock', title: 'Demo (simulata)', text: 'Journey, dati e deploy simulati: nessun collegamento a Marketing Cloud.' },
+  { id: 'file', title: 'Senza API (export su file)', text: "Nessun Installed Package: l'app legge gli export delle DE (Data Extract → SFTP o caricamento manuale)." },
+  { id: 'live', title: 'API', text: 'Chiamate REST/SOAP alla Business Unit: catalogo journey, creazione di DE e query, lettura dei risultati.' },
+] as const;
+
 export default function SettingsPage() {
   const s = useLoad(() => api.getSettings());
   const [form, setForm] = useState<Settings | null>(null);
@@ -79,17 +85,34 @@ export default function SettingsPage() {
           <h2>Salesforce Marketing Cloud</h2>
         </div>
         <div className="row" style={{ marginBottom: '1rem', alignItems: 'stretch' }}>
-          {(['mock', 'live'] as const).map((m) => (
-            <button key={m} type="button" className={`selectable${form.sfmc_mode === m ? ' selected' : ''}`} style={{ flex: '1 1 220px', width: 'auto' }} onClick={() => set('sfmc_mode', m)}>
+          {MODES.map((m) => (
+            <button key={m.id} type="button" className={`selectable${form.sfmc_mode === m.id ? ' selected' : ''}`} style={{ flex: '1 1 220px', width: 'auto' }} onClick={() => set('sfmc_mode', m.id)}>
               <div className="sel-head">
-                <h3>{m === 'mock' ? 'Mock (demo)' : 'Live'}</h3>
+                <h3>{m.title}</h3>
                 <span className="radio-mark" />
               </div>
-              <p>{m === 'mock' ? 'Dati e deploy simulati, nessuna chiamata a SFMC.' : 'Chiamate reali alle API REST/SOAP del Business Unit configurato.'}</p>
+              <p>{m.text}</p>
             </button>
           ))}
         </div>
-        <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
+        {form.sfmc_mode === 'file' && (
+          <div className="stack">
+            <label className="field">
+              Cartella degli export
+              <input type="text" value={form.sfmc_export_dir} onChange={(e) => set('sfmc_export_dir', e.target.value)} placeholder="vuoto = backend/data/sfmc_export" />
+              <span className="hint">
+                Dove arrivano i file della Data Extract (SFTP montato, cartella condivisa o sincronizzata). L'app cerca «CHIAVE_DE.csv»
+                o «CHIAVE_DE_data.csv» e usa il più recente. In alternativa i file si caricano a mano dalla pagina di monitoraggio.
+              </span>
+            </label>
+            <Alert kind="info" title="Come funziona senza API:">
+              i journey si inseriscono a mano nel wizard (nome, DE di ingresso, volumi, messaggi). Data Extension, query, Decision Split e
+              automation si creano in Marketing Cloud con le definizioni generate dall'app. L'automation esporta ogni giorno la DE dei
+              risultati (2 righe al giorno, nessun dato personale) e l'app la legge da qui.
+            </Alert>
+          </div>
+        )}
+        {form.sfmc_mode === 'live' && <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
           <label className="field">
             Subdomain
             <input type="text" value={form.sfmc_subdomain} onChange={(e) => set('sfmc_subdomain', e.target.value)} placeholder="mcxxxxxxxxxxxxxxxx" />
@@ -107,7 +130,7 @@ export default function SettingsPage() {
             <input type="password" value={secret} onChange={(e) => { setSecret(e.target.value); setSaved(false); }} placeholder={form.sfmc_client_secret_set ? 'già impostato' : 'non impostato'} autoComplete="new-password" />
             {form.sfmc_client_secret_set && <span className="hint">Già impostato — lascia vuoto per mantenerlo.</span>}
           </label>
-        </div>
+        </div>}
       </div>
 
       <div className="row" style={{ marginTop: '1.25rem' }}>

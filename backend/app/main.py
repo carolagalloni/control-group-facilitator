@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
 from pathlib import Path
@@ -41,7 +42,7 @@ class App:
         s = self.settings
         self.llm = LLMClient(s["llm_base_url"], s["llm_model"], s["llm_enabled"])
         try:
-            self.sfmc = service.make_sfmc(s)
+            self.sfmc = service.make_sfmc(s, self.state["manual_journeys"])
             self.sfmc_error = None
         except Exception as e:  # noqa: BLE001
             self.sfmc_error = str(e)
@@ -156,7 +157,8 @@ class SettingsIn(BaseModel):
     llm_enabled: Optional[bool] = None
     llm_base_url: Optional[str] = None
     llm_model: Optional[str] = None
-    sfmc_mode: Optional[Literal["mock", "live"]] = None
+    sfmc_mode: Optional[Literal["mock", "live", "file"]] = None
+    sfmc_export_dir: Optional[str] = None
     sfmc_subdomain: Optional[str] = None
     sfmc_mid: Optional[str] = None
     sfmc_client_id: Optional[str] = None
@@ -215,6 +217,19 @@ class ControlGroupIn(BaseModel):
     category: Optional[str] = None
 
 
+class ManualJourneyIn(BaseModel):
+    """Modalità senza API: il journey non si legge da SFMC, lo descrive l'utente."""
+    name: str = Field(min_length=1)
+    key: str = ""
+    entry_de: str = Field(min_length=1)
+    monthly_volume: int = Field(gt=0)
+    conversion_rate: float = Field(gt=0, lt=1)
+    avg_order_value: float = Field(gt=0)
+    expected_lift: float = Field(default=0.08, gt=0, lt=5)
+    messages: list[str] = []
+    folder: Optional[str] = None
+
+
 class InitiativeIn(ControlGroupIn):
     """Un'iniziativa = lo stesso control group applicato a uno o più journey (un holdout per journey)."""
     journey_id: Optional[str] = None  # type: ignore[assignment]
@@ -233,6 +248,7 @@ def _public_settings() -> dict:
 def health():
     s = core.settings
     return {"version": VERSION, "sfmc_mode": core.sfmc.mode, "sfmc_error": core.sfmc_error,
+            "sfmc_export_dir": str(core.sfmc.folder) if core.sfmc.mode == "file" else None,
             "llm": {"base_url": s["llm_base_url"], "model": s["llm_model"], "enabled": s["llm_enabled"],
                     "reachable": core.llm.reachable()}}
 
@@ -283,6 +299,23 @@ def list_journeys(q: str = "", status: str = "", folder: str = "", channel: str 
 def get_categories():
     used = {c["category"] for c in core.state["control_groups"]}
     return [*service.CATEGORIES, *sorted(used - set(service.CATEGORIES))]
+
+
+@api.post("/api/journeys/manual")
+def add_manual_journey(body: ManualJourneyIn):
+    if core.sfmc.mode != "file":
+        raise HTTPException(400, "I journey si inseriscono a mano solo nella modalità senza API (export su file)")
+    with core.lock:
+        n = len(core.state["manual_journeys"]) + 1
+        key = body.key.strip() or re.sub(r"\W+", "_", body.name.strip())[:40]
+        j = {"id": f"m-{secrets.token_hex(3)}", "key": key, "name": body.name.strip(),
+             "entry_de": body.entry_de.strip(), "monthly_volume": body.monthly_volume, "folder": body.folder,
+             "baseline": {"conversion_rate": body.conversion_rate, "avg_order_value": body.avg_order_value,
+                          "expected_lift": body.expected_lift},
+             "messages": [m.strip() for m in body.messages if m.strip()], "status": "Running", "n": n}
+        core.state["manual_journeys"].append(j)
+        core.save()
+    return _with_active(core.journey(j["id"]))
 
 
 @api.get("/api/journeys/{jid}")
@@ -343,7 +376,7 @@ def _validate(journey: dict, scope_id: str, activity_key: str | None):
 
 
 def _deploy(req: dict, journey: dict) -> dict:
-    cg = service.build_control_group(req, journey)
+    cg = service.build_control_group(req, journey, export=core.sfmc.mode == "file")
     siblings = [c for c in core.state["control_groups"] if c["journey_id"] == journey["id"]]
     service.deploy(cg, core.sfmc, siblings)
     if any(s["status"] == "errore" for s in cg["deploy_log"]):
@@ -505,7 +538,7 @@ def results(cid: str):
 def refresh(cid: str):
     cg = core.cg(cid)
     with core.lock:
-        if cg["data_source"]["type"] == "sfmc_de":
+        if cg["data_source"]["type"] == "sfmc_de" and core.sfmc.mode != "file":  # in "file" si rilegge l'export
             try:
                 if core.sfmc.mode == "mock":
                     core.sfmc.run_results_query(cg)
@@ -513,6 +546,24 @@ def refresh(cid: str):
                     core.sfmc.run_query(f"CG_{cg['id'][3:]}_Results")
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(502, f"Impossibile eseguire la query in SFMC: {e}") from e
+    return _results(cg)
+
+
+@api.post("/api/control-groups/{cid}/export")
+async def upload_export(cid: str, file: UploadFile = File(...)):
+    """Modalità senza API: carica a mano l'export della DE che l'app deve leggere (risultati o assegnazione)."""
+    cg = core.cg(cid)
+    if core.sfmc.mode != "file":
+        raise HTTPException(400, "Il caricamento degli export serve solo nella modalità senza API")
+    a = cg["artifacts"]
+    key = a["results_de"]["key"] if cg["data_source"]["type"] == "sfmc_de" else a["assignment_de"]["key"]
+    raw = await file.read()
+    if len(raw) > 200 * 1024 * 1024:
+        raise HTTPException(400, "File troppo grande (max 200 MB)")
+    try:
+        core.sfmc.save_export(key, raw)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Export non leggibile: {e}") from e
     return _results(cg)
 
 

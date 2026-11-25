@@ -78,7 +78,7 @@ export default function Header() {
             <>
               <span className="pill" title={health?.sfmc_error ? `Errore SFMC: ${health.sfmc_error}` : 'Modalità di connessione a Salesforce Marketing Cloud'}>
                 <span className={`dot ${health?.sfmc_error ? 'red' : health?.sfmc_mode === 'live' ? 'green' : 'amber'}`} />
-                SFMC: {health?.sfmc_mode ?? '…'}
+                SFMC: {health ? ({ mock: 'demo', file: 'senza API (export)', live: 'API' } as Record<string, string>)[health.sfmc_mode] ?? health.sfmc_mode : '…'}
                 {health?.sfmc_error && <strong style={{ color: 'var(--red)' }}>· errore</strong>}
               </span>
               <span className="pill" title={health?.llm.base_url}>

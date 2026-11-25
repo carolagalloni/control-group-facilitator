@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, InitiativeResults, KPI_LABELS, MemberResults, NarrativeResponse, Scope } from '../api';
 import ResultsView from '../components/ResultsView';
+import ExportUpload from '../components/ExportUpload';
 import { CompareBars, ForestPlot } from '../components/Comparison';
 import { AdvisorBox, ErrorBox, Loading, Modal, Spinner, StatusBadge, Thinking, useLoad } from '../components/ui';
 import { fmtDate, fmtEur, fmtInt, fmtKpi, fmtLift, fmtPct, shortLabels } from '../format';
@@ -15,6 +16,7 @@ export default function Initiative() {
   const ini = useLoad(() => api.initiative(id), [id]);
   const res = useLoad(() => api.initiativeResults(id), [id]);
   const scopes = useLoad(() => api.scopes().catch(() => [] as Scope[]));
+  const health = useLoad(() => api.health());
   const [view, setView] = useState(TOTAL);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshErr, setRefreshErr] = useState<unknown>(null);
@@ -123,6 +125,21 @@ export default function Initiative() {
         )}
         {res.loading && !r && <Loading text="Caricamento risultati…" />}
         <ErrorBox error={res.error} onRetry={res.reload} />
+
+        {health.data?.sfmc_mode === 'file' && r && (
+          <div className="stack">
+            {r.members.filter((m) => view === m.cg_id || (view === TOTAL && !m.results?.kpis.length)).map((m) => (
+              <ExportUpload
+                key={m.cg_id}
+                cgId={m.cg_id}
+                journeyName={multi ? m.journey_name : undefined}
+                fileName={i.control_groups?.find((c) => c.id === m.cg_id)?.artifacts.export_file}
+                folder={health.data?.sfmc_export_dir}
+                onLoaded={() => res.reload()}
+              />
+            ))}
+          </div>
+        )}
 
         {r && view === TOTAL && multi && <JourneyComparison r={r} primaryKpi={i.primary_kpi} />}
 

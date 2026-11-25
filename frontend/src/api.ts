@@ -9,7 +9,8 @@ export interface Health {
   version: string;
   sfmc_mode: 'mock' | 'live' | string;
   sfmc_error?: string | null;
-  llm: { base_url: string; model: string; enabled: boolean; reachable: boolean };
+  sfmc_export_dir?: string | null;
+  llm:{ base_url: string; model: string; enabled: boolean; reachable: boolean };
 }
 
 export interface Settings {
@@ -21,6 +22,19 @@ export interface Settings {
   sfmc_mid: string;
   sfmc_client_id: string;
   sfmc_client_secret_set: boolean;
+  sfmc_export_dir: string;
+}
+
+export interface ManualJourney {
+  name: string;
+  key?: string;
+  entry_de: string;
+  monthly_volume: number;
+  conversion_rate: number;
+  avg_order_value: number;
+  expected_lift?: number;
+  messages: string[];
+  folder?: string | null;
 }
 export type SettingsUpdate = Partial<Omit<Settings, 'sfmc_client_secret_set'>> & { sfmc_client_secret?: string };
 
@@ -176,6 +190,7 @@ export interface Artifacts {
   results_sql: string;
   journey_change: { description: string; target_journey: string; decision_split?: unknown; [k: string]: unknown };
   automation: { name: string; schedule: string; steps: string[]; [k: string]: unknown };
+  export_file?: string;
 }
 
 export type DeployStatus = 'ok' | 'simulato' | 'errore' | 'manuale' | string;
@@ -396,6 +411,12 @@ export const api = {
     return request<JourneyPage>('GET', `/journeys?${p.toString()}`);
   },
   categories: () => request<string[]>('GET', '/categories'),
+  addManualJourney: (j: ManualJourney) => request<Journey>('POST', '/journeys/manual', j),
+  uploadExport: (cgId: string, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return request<Results>('POST', `/control-groups/${encodeURIComponent(cgId)}/export`, fd, true);
+  },
   createInitiative: (b: InitiativeCreate) => request<Initiative>('POST', '/initiatives', b),
   initiatives: () => request<Initiative[]>('GET', '/initiatives'),
   initiative: (id: string) => request<Initiative>('GET', `/initiatives/${encodeURIComponent(id)}`),

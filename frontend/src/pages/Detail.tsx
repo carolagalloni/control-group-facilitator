@@ -4,6 +4,7 @@ import { api, KPI_LABELS, NarrativeResponse, Results } from '../api';
 import ArtifactsView, { DeployLog } from '../components/ArtifactsView';
 import JourneyDiagram from '../components/JourneyDiagram';
 import ResultsView from '../components/ResultsView';
+import ExportUpload from '../components/ExportUpload';
 import { AdvisorBox, ErrorBox, Loading, Modal, Spinner, StatusBadge, Tabs, Thinking, useLoad } from '../components/ui';
 import { fmtDate, fmtPct } from '../format';
 
@@ -15,6 +16,7 @@ export default function Detail() {
   const cg = useLoad(() => api.controlGroup(id), [id]);
   const res = useLoad(() => api.results(id), [id]);
   const journey = useLoad(() => (cg.data ? api.journey(cg.data.journey_id) : Promise.resolve(null)), [cg.data?.journey_id]);
+  const health = useLoad(() => api.health());
   const [tab, setTab] = useState<Tab>('risultati');
   const [refreshing, setRefreshing] = useState(false);
   const [refreshErr, setRefreshErr] = useState<unknown>(null);
@@ -115,6 +117,9 @@ export default function Detail() {
           {narr && !narrLoading && <AdvisorBox title="Commento dell'advisor" source={narr.source}>{narr.narrative}</AdvisorBox>}
           {res.loading && !r && <Loading text="Caricamento risultati…" />}
           {!!res.error && <ErrorBox error={res.error} onRetry={res.reload} />}
+          {health.data?.sfmc_mode === 'file' && (
+            <ExportUpload cgId={c.id} fileName={c.artifacts.export_file} folder={health.data.sfmc_export_dir} onLoaded={(x) => res.setData(x)} />
+          )}
           {r && <ResultsView r={r} primaryLabel={KPI_LABELS[c.primary_kpi]} />}
         </div>
       )}

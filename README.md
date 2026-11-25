@@ -55,6 +55,19 @@ Nel mock le vendite sintetiche contengono un lift vero (Welcome +10%, Carrello +
 
 Al primo avvio il mock crea anche tre iniziative di esempio su più journey sintetici (Retention, Cross-sell, Loyalty), così il monitoraggio per categoria non è vuoto. I tre journey curati restano liberi per la demo dal vivo.
 
+### Senza API (export su file)
+
+Terza modalità, per BU dove non si può creare un Installed Package. In **Impostazioni → Senza API** si indica la
+cartella dove arrivano gli export (SFTP montato, cartella condivisa o sincronizzata; vuota = `backend/data/sfmc_export`).
+
+- **Journey**: si inseriscono a mano nel wizard (nome, External Key della DE di ingresso, volumi, messaggi in ordine).
+- **Deploy**: l'app non crea nulla. Genera definizioni di DE, SQL, modifica del journey e passi dell'automation, che si
+  creano in SFMC; la checklist di deploy è tutta «manuale».
+- **Risultati**: l'automation aggiunge una *Data Extract* della DE dei risultati (`CG_Results_xxx.csv`, 2 righe al giorno,
+  nessun dato personale) e un *File Transfer* verso la cartella. L'app usa il file più recente (`CHIAVE.csv` o
+  `CHIAVE_data.csv`, UTF-8 o UTF-16). Con vendite in CSV/SQL serve invece l'export della DE di assegnazione.
+- In alternativa il file si carica a mano dalla pagina di monitoraggio («Carica export…»).
+
 ### Iniziative, categorie e monitoraggio
 
 - **Iniziativa**: lo stesso control group (obiettivo, % di holdout, KPI) applicato a uno o più customer journey. Nel wizard si selezionano più journey; ognuno riceve il suo holdout (DE, query e automation propri).

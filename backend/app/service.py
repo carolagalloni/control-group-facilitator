@@ -24,7 +24,12 @@ DEFAULT_SETTINGS = {
     "sfmc_mid": "",
     "sfmc_client_id": "",
     "sfmc_client_secret": "",
+    "sfmc_export_dir": "",  # modalità "file": cartella degli export (vuota = data/sfmc_export)
 }
+
+
+def export_dir(settings: dict) -> Path:
+    return Path(settings.get("sfmc_export_dir") or DATA_DIR / "sfmc_export")
 
 
 # ----------------------------------------------------------------------------- persistenza
@@ -37,6 +42,7 @@ def load_state() -> dict:
     st.setdefault("settings", {})
     st["settings"] = {**DEFAULT_SETTINGS, **st["settings"]}
     st.setdefault("control_groups", [])
+    st.setdefault("manual_journeys", [])
     for cg in st["control_groups"]:
         normalize(cg)
     return st
@@ -64,7 +70,8 @@ def save_state(st: dict) -> None:
 
 # ----------------------------------------------------------------------------- deploy
 
-def build_control_group(req: dict, journey: dict) -> dict:
+def build_control_group(req: dict, journey: dict, export: bool = False) -> dict:
+    """export=True (modalità senza API): l'automation esporta anche le DE che l'app deve leggere."""
     cid = secrets.token_hex(3)
     salt = secrets.token_hex(3)
     activity = next((a for a in journey["activities"] if a["key"] == req.get("activity_key")), None)
@@ -94,6 +101,16 @@ def build_control_group(req: dict, journey: dict) -> dict:
             ],
         },
     }
+    if export:
+        # senza API l'app legge solo file: la DE dei risultati (2 righe al giorno, nessun dato personale)
+        # oppure, con vendite fuori da SFMC, la DE di assegnazione
+        exp = results_key if req["data_source"]["type"] == "sfmc_de" else assign_key
+        artifacts["automation"]["steps"] += [
+            f"5. Data Extract «Data Extension Extract» di {exp} → file {exp}.csv (delimitatore virgola, "
+            "con intestazioni, UTF-8) nella cartella Safehouse",
+            f"6. File Transfer: sposta {exp}.csv dalla Safehouse all'SFTP (o alla cartella) letta dall'app",
+        ]
+        artifacts["export_file"] = f"{exp}.csv"
     return {
         "id": f"cg-{cid}", "name": req["name"], "journey_id": journey["id"], "journey_name": journey["name"],
         "initiative_id": req.get("initiative_id") or f"in-{cid}",
@@ -125,6 +142,30 @@ def deploy(cg: dict, sfmc, siblings: list[dict] | None = None) -> None:
         except Exception as e:  # noqa: BLE001 - riportiamo l'errore al cliente
             log.append({"step": name, "status": "errore", "detail": str(e)[:400]})
 
+    if sfmc.mode == "file":
+        # senza API nulla si crea da qui: si elencano i passi, con le definizioni nella scheda «Artefatti SFMC»
+        manual = [
+            (f"Creazione DE di assegnazione {a['assignment_de']['key']}",
+             "In Contact Builder → Data Extensions, con i campi indicati negli artefatti (PK SubscriberKey)."),
+            (f"Creazione DE risultati {a['results_de']['key']}",
+             "In Contact Builder, con i campi indicati negli artefatti (PK SnapshotDate + CG_Group)."),
+            ("Campo CG_Group nella DE di ingresso",
+             "Aggiungi un campo Text(20) CG_Group alla DE di ingresso del journey, se manca."),
+            ("Query Activity di assegnazione", "In Automation Studio: incolla lo SQL «Assegnazione» (azione Update)."),
+        ]
+        if cg["data_source"]["type"] == "sfmc_de":
+            manual.append(("Query Activity dei risultati",
+                           "In Automation Studio: incolla lo SQL «Risultati» (azione Update)."))
+        manual += [
+            ("Nuova versione journey con Decision Split",
+             "In Journey Builder seguendo i passi nella scheda «Modifica journey»."),
+            ("Automation giornaliera con export",
+             f"Passi nella scheda «Automation», compresi Data Extract e File Transfer di {a.get('export_file')}: "
+             "l'app legge quel file dalla cartella degli export o lo puoi caricare dal monitoraggio."),
+        ]
+        for name, detail in manual:
+            step(name, None, detail)
+        return
     step(f"Creazione DE di assegnazione {a['assignment_de']['key']}",
          lambda: sfmc.create_de(a["assignment_de"]["key"], a["assignment_de"]["fields"]))
     step(f"Creazione DE risultati {a['results_de']['key']}",
@@ -343,7 +384,10 @@ def overview(cgs: list[dict], sfmc) -> dict:
     return {"categories": out, "rows": rows}
 
 
-def make_sfmc(settings: dict):
+def make_sfmc(settings: dict, manual_journeys: list[dict] | None = None):
+    if settings["sfmc_mode"] == "file":
+        from .sfmc_file import FileSFMC
+        return FileSFMC(export_dir(settings), manual_journeys if manual_journeys is not None else [])
     if settings["sfmc_mode"] == "live":
         from .sfmc_live import LiveSFMC
         return LiveSFMC(settings["sfmc_subdomain"], settings["sfmc_client_id"], settings["sfmc_client_secret"],

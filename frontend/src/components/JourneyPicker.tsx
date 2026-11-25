@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, Journey, JourneyPage, JourneyQuery } from '../api';
 import { fmtDate, fmtInt, fmtPct } from '../format';
+import ManualJourneyForm from './ManualJourneyForm';
 import { ErrorBox, Spinner } from './ui';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -17,11 +18,15 @@ export const statusLabel = (s: string) => STATUS_LABEL[s] ?? s;
  * In modalità multipla si possono scegliere più journey (un'iniziativa); il primo selezionato è quello
  * di riferimento per advisor, posizione e dimensionamento.
  */
-export default function JourneyPicker({ selected, onChange, multi }: {
+export default function JourneyPicker({ selected, onChange, multi, manual }: {
   selected: Journey[];
   onChange: (j: Journey[]) => void;
   multi: boolean;
+  /** modalità senza API: i journey si inseriscono a mano */
+  manual?: boolean;
 }) {
+  const [showForm, setShowForm] = useState(false);
+  const [bump, setBump] = useState(0);
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
   const [filters, setFilters] = useState<JourneyQuery>({ status: 'Running', folder: '', channel: '', sort: 'name' });
@@ -45,7 +50,7 @@ export default function JourneyPicker({ selected, onChange, multi }: {
       .then((r) => s === seq.current && setData(r))
       .catch((e) => s === seq.current && setErr(e))
       .finally(() => s === seq.current && setLoading(false));
-  }, [debounced, filters, page]);
+  }, [debounced, filters, page, bump]);
 
   const isSel = (j: Journey) => selected.some((x) => x.id === j.id);
   const toggle = (j: Journey) => {
@@ -58,6 +63,25 @@ export default function JourneyPicker({ selected, onChange, multi }: {
 
   return (
     <div className="picker">
+      {manual && (
+        <div style={{ marginBottom: '0.75rem' }}>
+          {showForm ? (
+            <ManualJourneyForm
+              onCancel={() => setShowForm(false)}
+              onAdded={(j) => {
+                onChange(multi ? [...selected, j] : [j]);
+                setShowForm(false);
+                setBump((b) => b + 1);
+              }}
+            />
+          ) : (
+            <div className="row">
+              <button className="btn" onClick={() => setShowForm(true)}>+ Inserisci un journey</button>
+              <span className="muted small">Modalità senza API: l'elenco contiene solo i journey inseriti a mano.</span>
+            </div>
+          )}
+        </div>
+      )}
       {selected.length > 0 && (
         <div className="picker-selected">
           <span className="small muted" style={{ fontWeight: 600 }}>
@@ -141,7 +165,11 @@ export default function JourneyPicker({ selected, onChange, multi }: {
                 </button>
               );
             })}
-            {data.items.length === 0 && <p className="muted" style={{ padding: '1rem' }}>Nessun journey corrisponde alla ricerca.</p>}
+            {data.items.length === 0 && (
+              <p className="muted" style={{ padding: '1rem' }}>
+                {manual && !debounced ? 'Nessun journey inserito: usa «+ Inserisci un journey».' : 'Nessun journey corrisponde alla ricerca.'}
+              </p>
+            )}
           </div>
           {pages > 1 && (
             <div className="pager">

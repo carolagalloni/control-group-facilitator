@@ -90,6 +90,8 @@ export default function Wizard() {
   // catalogo
   const [scopes, setScopes] = useState<Scope[] | null>(null);
   const [categories, setCategories] = useState<string[]>([]);
+  const [sfmcMode, setSfmcMode] = useState('');
+  const fileMode = sfmcMode === 'file';
   const [catalogErr, setCatalogErr] = useState<unknown>(null);
 
   // step 1 — uno o più journey (iniziativa); il primo è il riferimento per advisor e dimensionamento
@@ -160,6 +162,7 @@ export default function Wizard() {
         if (def && !scopeId) setScopeId(def.id);
       })
       .catch(setCatalogErr);
+    api.health().then((h) => setSfmcMode(h.sfmc_mode)).catch(() => undefined);
     api
       .dataSourceTypes()
       .then((t) => {
@@ -460,7 +463,7 @@ export default function Wizard() {
               Cerca nel catalogo della Business Unit. Puoi selezionarne più di uno per misurare un'iniziativa (es. la stessa campagna su più mercati o segmenti):
               ogni journey avrà il suo holdout e il monitoraggio mostrerà il dettaglio per journey e il totale.
             </p>
-            <JourneyPicker selected={selected} onChange={setSelected} multi />
+            <JourneyPicker selected={selected} onChange={setSelected} multi manual={fileMode} />
             {busyJourneys.length > 0 && (
               <div style={{ marginTop: '0.75rem' }}>
                 <Alert kind="warning" title="Già in test:">
@@ -1013,9 +1016,19 @@ export default function Wizard() {
               {!payload && <div style={{ marginTop: '1rem' }}><Alert kind="error">Configurazione incompleta: torna ai passaggi precedenti.</Alert></div>}
               <div className="row" style={{ marginTop: '1.25rem' }}>
                 <button className="btn primary lg" onClick={create} disabled={!payload || creating || !name.trim()}>
-                  {creating && <Spinner />} Crea in SFMC{multi ? ` (${selected.length} journey)` : ''}
+                  {creating && <Spinner />} {fileMode ? 'Genera la configurazione SFMC' : 'Crea in SFMC'}{multi ? ` (${selected.length} journey)` : ''}
                 </button>
-                {creating && <span className="muted">Creazione di Data Extension, query e automation{multi ? ' per ogni journey' : ''}…</span>}
+                {creating && <span className="muted">{fileMode ? 'Preparazione di DE, query e automation da creare in SFMC' : 'Creazione di Data Extension, query e automation'}{multi ? ' per ogni journey' : ''}…</span>}
+              </div>
+              {fileMode && (
+                <div style={{ marginTop: '0.75rem' }}>
+                  <Alert kind="info" title="Modalità senza API:">
+                    l'app non crea nulla in Marketing Cloud. Genera definizioni di DE, SQL, modifica del journey e passi dell'automation
+                    (compresa la Data Extract del file da far arrivare all'app): li trovi subito dopo, nella checklist.
+                  </Alert>
+                </div>
+              )}
+              <div>
               </div>
               {!!createErr && (
                 <div style={{ marginTop: '0.75rem' }}>
