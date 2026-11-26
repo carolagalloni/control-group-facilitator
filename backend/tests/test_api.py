@@ -46,6 +46,31 @@ def test_full_flow_detects_hidden_lift():
     assert client.delete(f"/api/control-groups/{cg['id']}").json()["ok"]
 
 
+def test_sfmc_link_checked_and_used_in_artifacts():
+    base = {"journey_ids": ["j-winback"], "data_source": {"type": "sfmc_de", "config": {"sales_de_key": "Sales"}}}
+    ok = client.post("/api/sfmc/check-link", json={**base, "sfmc_link": {"de_folder": "Control group"}}).json()
+    assert ok["ok"] and ok["verifiable"] and ok["resolved"]["j-winback"]["entry_de"] == "Winback_Entry"
+    bad_link = {"journeys": {"j-winback": {"entry_de": "Non_Esiste", "contact_field": "CustomerID"}}}
+    bad = client.post("/api/sfmc/check-link", json={**base, "sfmc_link": bad_link}).json()
+    assert not bad["ok"] and any("Non_Esiste" in c["message"] for c in bad["checks"] if c["status"] == "error")
+    bad_cols = {**base, "data_source": {"type": "sfmc_de", "config": {"sales_de_key": "Sales", "col_amount": "Totale"}}}
+    r = client.post("/api/sfmc/check-link", json=bad_cols).json()
+    assert any(c["item"] == "DE vendite" and c["status"] == "error" and "Totale" in c["message"] for c in r["checks"])
+
+    body = {"name": "Link", "journey_ids": ["j-winback"], "scope_id": "journey_incrementality", "holdout_pct": 0.15,
+            "attribution_days": 30, **{k: v for k, v in base.items() if k != "journey_ids"}}
+    assert client.post("/api/initiatives", json={**body, "sfmc_link": bad_link}).status_code == 400
+    link = {"de_folder": "Control group", "query_folder": "CG queries", "automation_folder": "CG",
+            "journeys": {"j-winback": {"contact_field": "SubscriberKey", "entry_event_key": "DEAudience-winback"}}}
+    ini = client.post("/api/initiatives", json={**body, "sfmc_link": link}).json()
+    cg = ini["control_groups"][0]
+    assert cg["sfmc_link"]["query_folder"] == "CG queries"
+    assert any("in «Control group»" in s["step"] for s in cg["deploy_log"])
+    assert "DEAudience-winback" in str(cg["artifacts"]["journey_change"]["decision_split"])
+    assert "s.[Amount]" in cg["artifacts"]["results_sql"]
+    assert client.delete(f"/api/initiatives/{ini['id']}").json()["ok"]
+
+
 def test_external_sql_source():
     db = os.path.join(os.environ["CGF_DATA_DIR"], "samples", "sales.db")
     body = {"name": "Winback SQL", "journey_id": "j-winback", "scope_id": "journey_incrementality",

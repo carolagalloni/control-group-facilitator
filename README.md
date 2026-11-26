@@ -74,6 +74,19 @@ cartella dove arrivano gli export (SFTP montato, cartella condivisa o sincronizz
 - **Monitoraggio dell'iniziativa** (`/iniziativa/:id`): totale e dettaglio journey per journey, con il confronto tra chi era nel control group e chi ha ricevuto le comunicazioni. Il totale somma gli snapshot dei journey (stessa % di holdout).
 - **Categoria** (Onboarding, Retention, …, proposta dalla cartella SFMC del journey): la pagina **Monitoraggio** riassume ricavo incrementale e lift per categoria. Le % di holdout possono differire tra journey, quindi qui si sommano le stime journey per journey e le loro varianze, non gli snapshot.
 
+### Collegamento SFMC (passo 5 del wizard)
+
+Prima del deploy si dice all'app su cosa agire e dove creare gli oggetti:
+
+- **Ingresso di ogni journey**: External Key della DE di ingresso, campo con la chiave del contatto (se non è
+  `SubscriberKey`) ed Event Definition Key usata dal Decision Split. Sono proposti da quello che SFMC dice del journey.
+- **Cartelle** di Data Extension, Query Activity e automation (per nome; vuote = cartella principale).
+- **Dati delle vendite**: DE degli ordini e nomi delle sue colonne (contatto, data, importo, ID ordine), che entrano nella
+  SQL dei risultati.
+
+«Verifica su SFMC» controlla nella BU che DE, campi e cartelle esistano. Il deploy ripete la verifica e, con un errore,
+non crea nulla. Senza API la verifica diventa un elenco di controlli da fare a mano.
+
 ### Collegare una BU reale
 
 1. In SFMC: Setup → Installed Packages → nuovo package → componente **API Integration, Server-to-Server**.

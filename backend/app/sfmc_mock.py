@@ -247,9 +247,16 @@ class MockSFMC:
         return out
 
     # ------------------------------------------------------------------ data extensions
-    def create_de(self, key: str, fields: list[dict]) -> str:
+    def create_de(self, key: str, fields: list[dict], folder: str | None = None) -> str:
         self.de[key] = pd.DataFrame(columns=[f["name"] for f in fields])
         return "simulato"
+
+    def de_fields(self, key: str) -> list[str] | None:
+        """Campi della DE (None se non esiste)."""
+        return [str(c) for c in self.de[key].columns] if key in self.de else None
+
+    def find_folder(self, name: str, content_type: str) -> str:
+        return "simulato"  # nel mock ogni cartella esiste
 
     def read_de(self, key: str, limit: int | None = None) -> pd.DataFrame:
         if key not in self.de:
@@ -260,7 +267,7 @@ class MockSFMC:
     def de_exists(self, key: str) -> bool:
         return key in self.de
 
-    def create_query(self, name: str, sql: str, target: str) -> str:
+    def create_query(self, name: str, sql: str, target: str, folder: str | None = None) -> str:
         self.queries[name] = {"sql": sql, "target": target}
         return "simulato"
 

@@ -50,6 +50,16 @@ Salva l'export della DE che l'app legge (risultati, o assegnazione con vendite e
 
 ### GET /api/categories → `["Acquisizione", "Onboarding", ...]`
 
+### POST /api/sfmc/check-link
+Req `{ journey_ids: [..], sfmc_link: SfmcLink, data_source }`, con
+`SfmcLink = { de_folder, query_folder, automation_folder, journeys: { "<journey_id>": { entry_de, contact_field, entry_event_key } } }`
+(campi vuoti = dedotti dal journey: DE ed evento di ingresso letti da SFMC, chiave `SubscriberKey`, cartella principale).
+Res `{ verifiable, ok, checks: [{ item, status: "ok|warning|error|unverified", message }], resolved: { "<journey_id>": {...} } }`.
+Controlla nella BU che DE di ingresso, campo chiave, campo `CG_Group`, cartelle (per nome, tipo `dataextension`/`queryactivity`)
+e colonne della DE vendite esistano. In modalità `file` gli stati sono `unverified` (controlli da fare a mano).
+`POST /api/control-groups` e `POST /api/initiatives` accettano lo stesso `sfmc_link` ed eseguono la stessa verifica:
+con un `error` rispondono 400 senza creare nulla.
+
 ### POST /api/initiatives
 Come `POST /api/control-groups` ma con `journey_ids: [...]` al posto di `journey_id` e `category`. Crea un holdout per
 journey (tutto o niente: se un journey è già in test risponde 409 senza creare nulla). Con più journey è ammesso solo
@@ -177,7 +187,8 @@ Res: oggetto **ControlGroup**
 ### GET /api/datasources/types
 ```json
 [{ "type": "sfmc_de", "name": "Data Extension SFMC", "description": "...", "default": true,
-   "fields": [{ "name": "sales_de_key", "label": "External Key DE vendite", "kind": "text", "default": "Sales" }] }]
+   "fields": [{ "name": "sales_de_key", "label": "External Key DE vendite", "kind": "text", "default": "Sales" },
+              { "name": "col_key", ... }, { "name": "col_date", ... }, { "name": "col_amount", ... }, { "name": "col_order", ... }] }]
 ```
 type: `sfmc_de`, `csv`, `sql`. `kind` ∈ `text | password | textarea | file`.
 

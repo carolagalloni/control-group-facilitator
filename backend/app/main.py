@@ -203,6 +203,20 @@ class DataSourceIn(BaseModel):
     config: dict = {}
 
 
+class JourneyLinkIn(BaseModel):
+    entry_de: str = ""         # External Key della DE di ingresso (vuoto = quella letta dal journey)
+    contact_field: str = ""    # campo con la chiave del contatto nella DE di ingresso (vuoto = SubscriberKey)
+    entry_event_key: str = ""  # Event Definition Key, per il Decision Split
+
+
+class SfmcLinkIn(BaseModel):
+    """Collegamento SFMC: dove creare gli oggetti e su quali DE agire."""
+    de_folder: str = ""
+    query_folder: str = ""
+    automation_folder: str = ""
+    journeys: dict[str, JourneyLinkIn] = {}
+
+
 class ControlGroupIn(BaseModel):
     name: str = Field(min_length=1)
     journey_id: str
@@ -215,6 +229,13 @@ class ControlGroupIn(BaseModel):
     data_source: DataSourceIn = DataSourceIn(type="sfmc_de", config={"sales_de_key": "Sales"})
     guardrails: dict = {}
     category: Optional[str] = None
+    sfmc_link: SfmcLinkIn = SfmcLinkIn()
+
+
+class CheckLinkIn(BaseModel):
+    journey_ids: list[str] = Field(min_length=1, max_length=50)
+    sfmc_link: SfmcLinkIn = SfmcLinkIn()
+    data_source: DataSourceIn = DataSourceIn(type="sfmc_de", config={"sales_de_key": "Sales"})
 
 
 class ManualJourneyIn(BaseModel):
@@ -375,6 +396,23 @@ def _validate(journey: dict, scope_id: str, activity_key: str | None):
             "quello esistente prima di crearne uno nuovo."))
 
 
+def _check_link_or_400(journeys: list[dict], req: dict) -> None:
+    """Prima di creare qualunque cosa: DE, campi e cartelle devono esistere (dove si può verificare)."""
+    errors = [c for c in service.check_link(core.sfmc, journeys, req) if c["status"] == "error"]
+    if errors:
+        raise HTTPException(400, "Collegamento SFMC non valido: "
+                                 + " · ".join(f"{c['item']}: {c['message']}" for c in errors))
+
+
+@api.post("/api/sfmc/check-link")
+def check_link(body: CheckLinkIn):
+    journeys = [core.journey(j) for j in dict.fromkeys(body.journey_ids)]
+    checks = service.check_link(core.sfmc, journeys, body.model_dump())
+    links = {j["id"]: service.resolve_link(body.model_dump(), j) for j in journeys}
+    return {"verifiable": core.sfmc.mode != "file", "ok": not any(c["status"] == "error" for c in checks),
+            "checks": checks, "resolved": links}
+
+
 def _deploy(req: dict, journey: dict) -> dict:
     cg = service.build_control_group(req, journey, export=core.sfmc.mode == "file")
     siblings = [c for c in core.state["control_groups"] if c["journey_id"] == journey["id"]]
@@ -390,6 +428,7 @@ def create_cg(body: ControlGroupIn):
     _check_scope(body.scope_id)
     journey = core.journey(body.journey_id)
     _validate(journey, body.scope_id, body.activity_key)
+    _check_link_or_400([journey], body.model_dump())
     with core.lock:
         cg = _deploy(body.model_dump(), journey)
         core.save()
@@ -458,6 +497,7 @@ def create_initiative(body: InitiativeIn):
     activity = body.activity_key if len(ids) == 1 else None
     for j in journeys:  # tutto validato prima di toccare SFMC: o si crea tutto o niente
         _validate(j, body.scope_id, activity)
+    _check_link_or_400(journeys, body.model_dump())
     iid = "in-" + secrets.token_hex(3)
     out = []
     with core.lock:

@@ -12,6 +12,9 @@ import {
   InterpretResponse,
   Journey,
   JourneyDetail,
+  JourneyLink,
+  LinkCheckResponse,
+  SfmcLink,
   KPI_IDS,
   KPI_LABELS,
   NarrativeResponse,
@@ -28,7 +31,10 @@ import ArtifactsView, { DeployLog } from '../components/ArtifactsView';
 import { AdvisorBox, Alert, ErrorBox, Loading, SourceBadge, Spinner, Thinking } from '../components/ui';
 import { fmtEur, fmtEur2, fmtInt, fmtLift, fmtPct } from '../format';
 
-const STEPS = ['Obiettivo', 'Posizione', 'Dimensione', 'Monitoraggio', 'Riepilogo e deploy'];
+const STEPS = ['Obiettivo', 'Posizione', 'Dimensione', 'Monitoraggio', 'Collegamento SFMC', 'Riepilogo e deploy'];
+const LAST = STEPS.length - 1;
+const CHECK_BADGE: Record<string, string> = { ok: 'green', warning: 'amber', error: 'red', unverified: '' };
+const CHECK_LABEL: Record<string, string> = { ok: 'ok', warning: 'attenzione', error: 'errore', unverified: 'da verificare a mano' };
 
 /** form di sizing in unità "utente" (percentuali come numeri 0–100) */
 interface SizingForm {
@@ -147,7 +153,15 @@ export default function Wizard() {
   const [srmAlpha, setSrmAlpha] = useState('0.001');
   const [alertNeg, setAlertNeg] = useState(true);
 
-  // step 5
+  // step 5 — collegamento SFMC: su quali DE agire e dove creare gli oggetti
+  const [folders, setFolders] = useState({ de_folder: '', query_folder: '', automation_folder: '' });
+  const [jLinks, setJLinks] = useState<Record<string, JourneyLink>>({});
+  const [linkCheck, setLinkCheck] = useState<LinkCheckResponse | null>(null);
+  const [checkedKey, setCheckedKey] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [checkErr, setCheckErr] = useState<unknown>(null);
+
+  // step 6
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<unknown>(null);
   const [created, setCreated] = useState<Initiative | null>(null);
@@ -195,6 +209,45 @@ export default function Wizard() {
   useEffect(() => {
     if (!categoryEdited) setCategory(selected[0]?.folder || '');
   }, [selected, categoryEdited]);
+
+  // DE di ingresso ed evento proposti da quello che SFMC dice del journey; l'utente li può correggere
+  useEffect(() => {
+    setJLinks((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      selected.forEach((j) => {
+        if (!next[j.id]) {
+          next[j.id] = { entry_de: j.entry_de || '', contact_field: 'SubscriberKey', entry_event_key: j.entry_event_key || '' };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [selected]);
+  const sfmcLink: SfmcLink = {
+    ...folders,
+    journeys: Object.fromEntries(selected.map((j) => [j.id, jLinks[j.id] ?? { entry_de: j.entry_de || '', contact_field: 'SubscriberKey', entry_event_key: j.entry_event_key || '' }])),
+  };
+  const setJLink = (id: string, k: keyof JourneyLink, v: string) =>
+    setJLinks((p) => ({ ...p, [id]: { ...(p[id] ?? { entry_de: '', contact_field: 'SubscriberKey', entry_event_key: '' }), [k]: v } }));
+  const linkComplete =
+    selected.every((j) => sfmcLink.journeys[j.id]?.entry_de.trim()) &&
+    (dsType !== 'sfmc_de' || !!(dsConfig.sales_de_key ?? '').trim());
+  const linkKey = JSON.stringify({ sfmcLink, dsType, dsConfig });
+  const runCheck = async () => {
+    setChecking(true);
+    setCheckErr(null);
+    const k = linkKey;
+    try {
+      setLinkCheck(await api.checkLink({ journey_ids: selected.map((j) => j.id), sfmc_link: sfmcLink, data_source: { type: dsType, config: dsConfig } }));
+      setCheckedKey(k);
+    } catch (e) {
+      setCheckErr(e);
+    } finally {
+      setChecking(false);
+    }
+  };
+  const checkFresh = !!linkCheck && checkedKey === linkKey;
 
   const scope = scopes?.find((s) => s.id === scopeId);
   const journeySummary = selected[0];
@@ -390,6 +443,7 @@ export default function Wizard() {
           attribution_days: Math.round(num(attributionDays)) || 30,
           data_source: { type: dsType, config: dsConfig },
           guardrails: { srm_alpha: num(srmAlpha) || 0.001, alert_negative_lift: alertNeg },
+          sfmc_link: sfmcLink,
         }
       : null;
 
@@ -411,11 +465,12 @@ export default function Wizard() {
     !!journeyId && !!scope && scope.enabled,
     !!candidate && (!isTouchpoint || !!candidate.activity_key),
     holdoutPct !== null && !!sizing,
-    !!name.trim() && !!category.trim() && kpis.length > 0 && !!dsType && num(attributionDays) > 0,
+    !!name.trim() && !!category.trim() && kpis.length > 0 && num(attributionDays) > 0,
+    !!dsType && linkComplete,
     true,
   ];
   const go = (s: number) => {
-    if (created && s < 4) return;
+    if (created && s < LAST) return;
     setStep(s);
     setMaxStep((m) => Math.max(m, s));
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -432,7 +487,7 @@ export default function Wizard() {
       <div className="page-head">
         <div>
           <h1>Nuovo control group</h1>
-          <p>Cinque passaggi guidati: dall'obiettivo di business al deploy in Marketing Cloud.</p>
+          <p>Sei passaggi guidati: dall'obiettivo di business al deploy in Marketing Cloud.</p>
         </div>
       </div>
 
@@ -441,11 +496,11 @@ export default function Wizard() {
           <button
             key={s}
             className={i === step ? 'current' : i < step || i <= maxStep ? (i < step || created ? 'done' : '') : ''}
-            disabled={i > maxStep || (!!created && i < 4)}
+            disabled={i > maxStep || (!!created && i < LAST)}
             onClick={() => go(i)}
             aria-current={i === step ? 'step' : undefined}
           >
-            <span className="num">{i < step || (created && i <= 4 && i !== step) ? '✓' : i + 1}</span>
+            <span className="num">{i < step || (created && i <= LAST && i !== step) ? '✓' : i + 1}</span>
             <span className="lbl">{s}</span>
           </button>
         ))}
@@ -865,7 +920,82 @@ export default function Wizard() {
           </div>
 
           <div className="card">
-            <h2>Sorgente dati vendite</h2>
+            <h2>Guardrail</h2>
+            <div className="form-grid" style={{ alignItems: 'end' }}>
+              <NumField label="Soglia SRM (alpha)" hint="test chi-quadro sullo sbilanciamento dei gruppi" value={srmAlpha} onChange={setSrmAlpha} step="0.001" />
+              <label className="check" style={{ paddingBottom: '0.55rem' }}>
+                <input type="checkbox" checked={alertNeg} onChange={(e) => setAlertNeg(e.target.checked)} />
+                Avvisa in caso di lift negativo significativo
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 5 — collegamento SFMC */}
+      {step === 4 && (
+        <div className="stack">
+          <div className="card">
+            <h2>1. Ingresso dei journey</h2>
+            <p className="muted small">
+              La query di assegnazione legge i contatti dalla Data Extension di ingresso e ci scrive il gruppo (campo CG_Group); il Decision Split del journey legge quel campo dall'evento di ingresso.
+              {fileMode ? ' Valori presi dai journey che hai inserito.' : ' Valori letti dal journey in SFMC: correggili se la BU usa un\'altra DE o un\'altra chiave del contatto.'}
+            </p>
+            <div className="table-wrap">
+              <table className="compact link-table">
+                <thead>
+                  <tr>
+                    <th>Journey</th>
+                    <th>DE di ingresso (External Key)</th>
+                    <th title="Campo della DE di ingresso con la chiave del contatto (quella usata anche nelle vendite)">Campo chiave contatto</th>
+                    <th title="Journey Builder → evento di ingresso → Event Definition Key">Event Definition Key</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selected.map((j) => {
+                    const l = sfmcLink.journeys[j.id];
+                    return (
+                      <tr key={j.id}>
+                        <td><strong>{j.name}</strong><div className="muted small">{j.entry_source}</div></td>
+                        <td><input type="text" value={l.entry_de} placeholder="es. Cart_Abandon_Entry" aria-invalid={!l.entry_de.trim()} onChange={(e) => setJLink(j.id, 'entry_de', e.target.value)} /></td>
+                        <td><input type="text" value={l.contact_field} placeholder="SubscriberKey" onChange={(e) => setJLink(j.id, 'contact_field', e.target.value)} /></td>
+                        <td><input type="text" value={l.entry_event_key} placeholder="DEAudience-…" onChange={(e) => setJLink(j.id, 'entry_event_key', e.target.value)} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>2. Dove creare gli oggetti</h2>
+            <p className="muted small">
+              Cartelle già esistenti nella BU, cercate per nome (con un percorso «A/B» conta l'ultimo livello). Lasciale vuote per usare la cartella principale.
+              {sfmcMode === 'mock' && ' In modalità simulata ogni cartella è valida.'}
+            </p>
+            <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+              <label className="field">
+                Cartella delle Data Extension
+                <input type="text" value={folders.de_folder} placeholder="es. Control Group" onChange={(e) => setFolders({ ...folders, de_folder: e.target.value })} />
+                <span className="hint">Contact Builder → Data Extensions: qui vanno CG_Assign e CG_Results.</span>
+              </label>
+              <label className="field">
+                Cartella delle Query Activity
+                <input type="text" value={folders.query_folder} placeholder="es. Control Group" onChange={(e) => setFolders({ ...folders, query_folder: e.target.value })} />
+                <span className="hint">Automation Studio → Activities → SQL Query.</span>
+              </label>
+              <label className="field">
+                Cartella dell'automation
+                <input type="text" value={folders.automation_folder} placeholder="es. Control Group" onChange={(e) => setFolders({ ...folders, automation_folder: e.target.value })} />
+                <span className="hint">L'automation si crea a mano: la checklist dirà dove metterla.</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>3. Dati delle vendite</h2>
+            <p className="muted small">Da dove arrivano gli ordini da confrontare tra controllo e trattamento, e come si chiamano le colonne nella sorgente della BU.</p>
             {!dsTypes && !dsErr && <Loading />}
             {dsTypes && (
               <>
@@ -949,20 +1079,43 @@ export default function Wizard() {
           </div>
 
           <div className="card">
-            <h2>Guardrail</h2>
-            <div className="form-grid" style={{ alignItems: 'end' }}>
-              <NumField label="Soglia SRM (alpha)" hint="test chi-quadro sullo sbilanciamento dei gruppi" value={srmAlpha} onChange={setSrmAlpha} step="0.001" />
-              <label className="check" style={{ paddingBottom: '0.55rem' }}>
-                <input type="checkbox" checked={alertNeg} onChange={(e) => setAlertNeg(e.target.checked)} />
-                Avvisa in caso di lift negativo significativo
-              </label>
+            <div className="card-title">
+              <h2 style={{ margin: 0 }}>4. Verifica</h2>
+              {checkFresh && linkCheck && (
+                <span className={`badge ${linkCheck.ok ? 'green' : 'red'}`}>{linkCheck.ok ? 'nessun errore' : 'da correggere'}</span>
+              )}
             </div>
+            <p className="muted small">
+              {fileMode
+                ? "Senza API l'app non può guardare dentro Marketing Cloud: ti elenca cosa controllare a mano."
+                : sfmcMode === 'mock'
+                  ? "Controlla che DE, campi e cartelle esistano (in modalità simulata: nella BU di esempio)."
+                  : "Controlla nella BU che DE, campi e cartelle esistano davvero, prima di creare qualunque cosa. Con errori il deploy viene rifiutato."}
+            </p>
+            <div className="row">
+              <button className="btn primary" onClick={runCheck} disabled={checking || !linkComplete || !dsType}>
+                {checking && <Spinner />} {fileMode ? 'Elenca i controlli' : 'Verifica su SFMC'}
+              </button>
+              {linkCheck && !checkFresh && <span className="muted small">Hai modificato il collegamento: ripeti la verifica.</span>}
+              {!linkComplete && <span className="muted small">Indica la DE di ingresso di ogni journey{dsType === 'sfmc_de' ? ' e la DE vendite' : ''}.</span>}
+            </div>
+            {!!checkErr && <div style={{ marginTop: '0.75rem' }}><ErrorBox error={checkErr} /></div>}
+            {linkCheck && (
+              <ul className="check-list" style={{ opacity: checkFresh ? 1 : 0.55 }}>
+                {linkCheck.checks.map((c, i) => (
+                  <li key={i}>
+                    <span className={`badge ${CHECK_BADGE[c.status] ?? ''}`}>{CHECK_LABEL[c.status] ?? c.status}</span>
+                    <div><strong>{c.item}</strong><div className="small">{c.message}</div></div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}
 
-      {/* STEP 5 */}
-      {step === 4 && (
+      {/* STEP 6 */}
+      {step === LAST && (
         <div className="stack">
           {!created && (
             <div className="card">
@@ -998,6 +1151,19 @@ export default function Wizard() {
                     <dt>Attribuzione</dt><dd>{attributionDays} giorni</dd>
                     <dt>Sorgente</dt><dd>{dsDef?.name ?? dsType}</dd>
                     <dt>Guardrail</dt><dd>SRM α {srmAlpha}{alertNeg ? ' · alert lift negativo' : ''}</dd>
+                  </dl>
+                </div>
+                <div>
+                  <h3>Collegamento SFMC</h3>
+                  <dl className="dl">
+                    <dt>DE ingresso</dt>
+                    <dd>{multi ? `${selected.length} DE (una per journey)` : <span className="mono">{sfmcLink.journeys[journeyId]?.entry_de}</span>}</dd>
+                    <dt>Chiave</dt><dd>{[...new Set(selected.map((j) => sfmcLink.journeys[j.id]?.contact_field || 'SubscriberKey'))].join(', ')}</dd>
+                    <dt>Cartella DE</dt><dd>{folders.de_folder || 'principale'}</dd>
+                    <dt>Cartella query</dt><dd>{folders.query_folder || 'principale'}</dd>
+                    {dsType === 'sfmc_de' && <><dt>DE vendite</dt><dd className="mono">{dsConfig.sales_de_key}</dd></>}
+                    <dt>Verifica</dt>
+                    <dd>{checkFresh && linkCheck ? (linkCheck.ok ? (linkCheck.verifiable ? 'superata' : 'controlli manuali') : 'con errori') : 'non eseguita'}</dd>
                   </dl>
                 </div>
               </div>
@@ -1080,7 +1246,7 @@ export default function Wizard() {
           <button className="btn" onClick={() => go(step - 1)} disabled={step === 0}>
             ← Indietro
           </button>
-          {step < 4 && (
+          {step < LAST && (
             <button className="btn primary" onClick={() => go(step + 1)} disabled={!canNext[step]}>
               Avanti: {STEPS[step + 1]} →
             </button>

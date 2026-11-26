@@ -68,6 +68,116 @@ def save_state(st: dict) -> None:
     STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+# ----------------------------------------------------------------------------- collegamento SFMC
+
+def resolve_link(req: dict, journey: dict) -> dict:
+    """Dove e su cosa agisce il control group in SFMC: DE di ingresso e chiave del contatto (per journey),
+    cartelle di DE, query e automation. Quello che l'utente non indica si deduce dal journey."""
+    link = req.get("sfmc_link") or {}
+    jl = (link.get("journeys") or {}).get(journey["id"]) or {}
+    s = lambda d, k: str(d.get(k) or "").strip()  # noqa: E731
+    return {"entry_de": s(jl, "entry_de") or journey.get("entry_de") or "",
+            "contact_field": s(jl, "contact_field") or "SubscriberKey",
+            "entry_event_key": s(jl, "entry_event_key") or journey.get("entry_event_key") or "",
+            "de_folder": s(link, "de_folder"), "query_folder": s(link, "query_folder"),
+            "automation_folder": s(link, "automation_folder")}
+
+
+def _has(fields: list[str], name: str) -> bool:
+    return name.lower() in {f.lower() for f in fields}
+
+
+def check_link(sfmc, journeys: list[dict], req: dict) -> list[dict]:
+    """Verifica su SFMC che DE di ingresso, campi, cartelle e DE vendite esistano davvero.
+    status: ok | warning | error | unverified (senza API non si può controllare)."""
+    out: list[dict] = []
+    can = sfmc.mode != "file"
+
+    def add(item, status, message):
+        out.append({"item": item, "status": status, "message": message})
+
+    def fields_of(key):
+        try:
+            return sfmc.de_fields(key), None
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)[:300]
+
+    for j in journeys:
+        link = resolve_link(req, j)
+        name = f"«{j['name']}»"
+        if not link["entry_de"]:
+            add(f"DE di ingresso {name}", "error", "Non indicata: inserisci l'External Key della DE di ingresso.")
+        elif not can:
+            add(f"DE di ingresso {name}", "unverified",
+                f"{link['entry_de']}: senza API controlla in Contact Builder che esista e abbia il campo "
+                f"{link['contact_field']} e un campo CG_Group.")
+        else:
+            if sfmc.mode == "mock":
+                ij = internal_journey(j["id"])
+                if ij is not None:
+                    sfmc._ensure_entries(ij)
+            fields, err = fields_of(link["entry_de"])
+            if err:
+                add(f"DE di ingresso {name}", "error", f"Verifica non riuscita: {err}")
+            elif fields is None:
+                add(f"DE di ingresso {name}", "error", f"La DE «{link['entry_de']}» non esiste nella BU.")
+            elif not _has(fields, link["contact_field"]):
+                add(f"DE di ingresso {name}", "error",
+                    f"La DE «{link['entry_de']}» non ha il campo «{link['contact_field']}». "
+                    f"Campi: {', '.join(fields[:15])}.")
+            elif not _has(fields, "CG_Group"):
+                add(f"DE di ingresso {name}", "warning",
+                    f"«{link['entry_de']}» esiste ma non ha il campo CG_Group: aggiungilo (Text 20) prima di "
+                    "attivare l'automation, la query 1b lo scrive.")
+            else:
+                add(f"DE di ingresso {name}", "ok",
+                    f"«{link['entry_de']}» esiste, chiave contatto {link['contact_field']}, campo CG_Group presente.")
+        if not link["entry_event_key"]:
+            add(f"Evento di ingresso {name}", "warning",
+                "Event Definition Key non nota: nel Decision Split scegli a mano il campo CG_Group dell'evento.")
+
+    link = resolve_link(req, journeys[0]) if journeys else resolve_link(req, {"id": ""})
+    for label, key, ctype in (("Cartella delle Data Extension", "de_folder", "dataextension"),
+                              ("Cartella delle Query Activity", "query_folder", "queryactivity")):
+        if not link[key]:
+            add(label, "ok", "Nessuna indicata: si usa la cartella principale.")
+        elif not can:
+            add(label, "unverified", f"«{link[key]}»: senza API crea gli oggetti in questa cartella a mano.")
+        else:
+            try:
+                sfmc.find_folder(link[key], ctype)
+                add(label, "ok", f"«{link[key]}» trovata.")
+            except Exception as e:  # noqa: BLE001
+                add(label, "error", str(e)[:300])
+    if link["automation_folder"]:
+        add("Cartella dell'automation", "ok" if can else "unverified",
+            f"«{link['automation_folder']}»: l'automation si crea a mano in Automation Studio, in questa cartella.")
+
+    ds = req.get("data_source") or {}
+    if ds.get("type") == "sfmc_de":
+        cfg = ds.get("config") or {}
+        key = str(cfg.get("sales_de_key") or "").strip()
+        cols = sfmc_sql.sales_columns(cfg)
+        if not key:
+            add("DE vendite", "error", "Non indicata: inserisci l'External Key della DE con gli ordini.")
+        elif not can:
+            add("DE vendite", "unverified",
+                f"«{key}»: senza API controlla che abbia le colonne {', '.join(cols.values())}.")
+        else:
+            fields, err = fields_of(key)
+            missing = [c for c in cols.values() if fields is not None and not _has(fields, c)]
+            if err:
+                add("DE vendite", "error", f"Verifica non riuscita: {err}")
+            elif fields is None:
+                add("DE vendite", "error", f"La DE «{key}» non esiste nella BU.")
+            elif missing:
+                add("DE vendite", "error", f"Nella DE «{key}» mancano le colonne {', '.join(missing)}. "
+                                           f"Campi: {', '.join(fields[:15])}.")
+            else:
+                add("DE vendite", "ok", f"«{key}» esiste con le colonne {', '.join(cols.values())}.")
+    return out
+
+
 # ----------------------------------------------------------------------------- deploy
 
 def build_control_group(req: dict, journey: dict, export: bool = False) -> dict:
@@ -77,25 +187,30 @@ def build_control_group(req: dict, journey: dict, export: bool = False) -> dict:
     activity = next((a for a in journey["activities"] if a["key"] == req.get("activity_key")), None)
     touch = activity is not None
     assign_key, results_key = f"CG_Assign_{cid}", f"CG_Results_{cid}"
-    sales_key = req["data_source"].get("config", {}).get("sales_de_key", "Sales")
-    entry_de = journey.get("entry_de") or "ENTRY_DE"
+    ds_cfg = req["data_source"].get("config", {})
+    sales_key = ds_cfg.get("sales_de_key") or "Sales"
+    link = resolve_link(req, journey)
+    entry_de = link["entry_de"] or "ENTRY_DE"
+    where_q = f" (cartella «{link['query_folder']}»)" if link["query_folder"] else ""
     artifacts = {
-        "assignment_de": {"key": assign_key, "fields": sfmc_sql.ASSIGN_FIELDS},
-        "results_de": {"key": results_key, "fields": sfmc_sql.RESULTS_FIELDS},
+        "assignment_de": {"key": assign_key, "fields": sfmc_sql.ASSIGN_FIELDS, "folder": link["de_folder"] or None},
+        "results_de": {"key": results_key, "fields": sfmc_sql.RESULTS_FIELDS, "folder": link["de_folder"] or None},
         "assignment_sql": sfmc_sql.assignment_sql(entry_de, assign_key, salt, req["holdout_pct"],
-                                                  journey["key"], touch),
-        "results_sql": sfmc_sql.results_sql(assign_key, sales_key, results_key, req["attribution_days"], touch),
+                                                  journey["key"], touch, link["contact_field"]),
+        "results_sql": sfmc_sql.results_sql(assign_key, sales_key, results_key, req["attribution_days"], touch,
+                                            ds_cfg if req["data_source"]["type"] == "sfmc_de" else None),
         "journey_change": sfmc_sql.journey_change(journey, activity, assign_key,
-                                                  journey.get("entry_event_key") or "ENTRY_EVENT",
+                                                  link["entry_event_key"] or "ENTRY_EVENT",
                                                   exit_control=req["scope_id"] == "journey_incrementality"),
         "automation": {
             "name": f"CG_{cid}_Daily",
+            "folder": link["automation_folder"] or None,
             "schedule": "Ogni giorno alle 06:00 (prima dell'ingresso nel journey)",
             "steps": [
                 f"1. Import/aggiornamento della DE di ingresso {entry_de} (attività esistente)",
-                f"2. Query Activity CG_{cid}_Assign → {assign_key} (assegnazione deterministica)",
-                f"3. Query Activity CG_{cid}_AssignFlag → {entry_de} (propaga CG_Group)",
-                f"4. Query Activity CG_{cid}_Results → {results_key} (snapshot KPI)"
+                f"2. Query Activity CG_{cid}_Assign → {assign_key} (assegnazione deterministica){where_q}",
+                f"3. Query Activity CG_{cid}_AssignFlag → {entry_de} (propaga CG_Group){where_q}",
+                f"4. Query Activity CG_{cid}_Results → {results_key} (snapshot KPI){where_q}"
                 + ("" if req["data_source"]["type"] == "sfmc_de" else " — non necessaria: KPI calcolati "
                    "dall'app con la sorgente esterna"),
             ],
@@ -123,6 +238,7 @@ def build_control_group(req: dict, journey: dict, export: bool = False) -> dict:
         "attribution_days": req["attribution_days"], "data_source": req["data_source"],
         "guardrails": {"srm_alpha": 0.001, "alert_negative_lift": True, **(req.get("guardrails") or {})},
         "salt": salt, "status": "attivo", "created_at": now_iso(), "artifacts": artifacts, "deploy_log": [],
+        "sfmc_link": link,
     }
 
 
@@ -142,43 +258,52 @@ def deploy(cg: dict, sfmc, siblings: list[dict] | None = None) -> None:
         except Exception as e:  # noqa: BLE001 - riportiamo l'errore al cliente
             log.append({"step": name, "status": "errore", "detail": str(e)[:400]})
 
+    link = cg.get("sfmc_link") or {}
+    de_folder, q_folder, au_folder = (link.get(k) or None for k in ("de_folder", "query_folder", "automation_folder"))
+    in_de = f" in «{de_folder}»" if de_folder else ""
+    in_q = f" in «{q_folder}»" if q_folder else ""
+    in_au = f", cartella «{au_folder}»" if au_folder else ""
+    entry_de = link.get("entry_de") or "di ingresso"
     if sfmc.mode == "file":
         # senza API nulla si crea da qui: si elencano i passi, con le definizioni nella scheda «Artefatti SFMC»
         manual = [
-            (f"Creazione DE di assegnazione {a['assignment_de']['key']}",
+            (f"Creazione DE di assegnazione {a['assignment_de']['key']}{in_de}",
              "In Contact Builder → Data Extensions, con i campi indicati negli artefatti (PK SubscriberKey)."),
-            (f"Creazione DE risultati {a['results_de']['key']}",
+            (f"Creazione DE risultati {a['results_de']['key']}{in_de}",
              "In Contact Builder, con i campi indicati negli artefatti (PK SnapshotDate + CG_Group)."),
-            ("Campo CG_Group nella DE di ingresso",
+            (f"Campo CG_Group nella DE {entry_de}",
              "Aggiungi un campo Text(20) CG_Group alla DE di ingresso del journey, se manca."),
-            ("Query Activity di assegnazione", "In Automation Studio: incolla lo SQL «Assegnazione» (azione Update)."),
+            (f"Query Activity di assegnazione{in_q}",
+             "In Automation Studio: incolla lo SQL «Assegnazione» (azione Update)."),
         ]
         if cg["data_source"]["type"] == "sfmc_de":
-            manual.append(("Query Activity dei risultati",
+            manual.append((f"Query Activity dei risultati{in_q}",
                            "In Automation Studio: incolla lo SQL «Risultati» (azione Update)."))
         manual += [
             ("Nuova versione journey con Decision Split",
              "In Journey Builder seguendo i passi nella scheda «Modifica journey»."),
-            ("Automation giornaliera con export",
+            (f"Automation giornaliera con export{in_au}",
              f"Passi nella scheda «Automation», compresi Data Extract e File Transfer di {a.get('export_file')}: "
              "l'app legge quel file dalla cartella degli export o lo puoi caricare dal monitoraggio."),
         ]
         for name, detail in manual:
             step(name, None, detail)
         return
-    step(f"Creazione DE di assegnazione {a['assignment_de']['key']}",
-         lambda: sfmc.create_de(a["assignment_de"]["key"], a["assignment_de"]["fields"]))
-    step(f"Creazione DE risultati {a['results_de']['key']}",
-         lambda: sfmc.create_de(a["results_de"]["key"], a["results_de"]["fields"]))
-    step("Query Activity di assegnazione",
-         lambda: sfmc.create_query(f"CG_{cg['id'][3:]}_Assign", a["assignment_sql"], a["assignment_de"]["key"]))
+    step(f"Creazione DE di assegnazione {a['assignment_de']['key']}{in_de}",
+         lambda: sfmc.create_de(a["assignment_de"]["key"], a["assignment_de"]["fields"], folder=de_folder))
+    step(f"Creazione DE risultati {a['results_de']['key']}{in_de}",
+         lambda: sfmc.create_de(a["results_de"]["key"], a["results_de"]["fields"], folder=de_folder))
+    step(f"Query Activity di assegnazione{in_q}",
+         lambda: sfmc.create_query(f"CG_{cg['id'][3:]}_Assign", a["assignment_sql"], a["assignment_de"]["key"],
+                                   folder=q_folder))
     if cg["data_source"]["type"] == "sfmc_de":
-        step("Query Activity dei risultati",
-             lambda: sfmc.create_query(f"CG_{cg['id'][3:]}_Results", a["results_sql"], a["results_de"]["key"]))
+        step(f"Query Activity dei risultati{in_q}",
+             lambda: sfmc.create_query(f"CG_{cg['id'][3:]}_Results", a["results_sql"], a["results_de"]["key"],
+                                       folder=q_folder))
     if sfmc.mode == "mock":
         step(f"Nuova versione journey con Decision Split ({a['journey_change']['description']})",
              lambda: "simulato")
-        step("Automation giornaliera", lambda: "simulato")
+        step(f"Automation giornaliera{in_au}", lambda: "simulato")
         j = internal_journey(cg["journey_id"])
         step("Retro-simulazione di 75 giorni di test (dati sintetici con effetto reale nascosto)",
              lambda: (sfmc.simulate_journey(j, [*(siblings or []), cg]), "simulato")[1])
@@ -186,7 +311,7 @@ def deploy(cg: dict, sfmc, siblings: list[dict] | None = None) -> None:
         step("Nuova versione journey con Decision Split", None,
              "Da applicare in Journey Builder seguendo i passi nella scheda «Modifica journey» "
              "(la modifica di un journey attivo via API è volutamente non automatica).")
-        step("Automation giornaliera", None,
+        step(f"Automation giornaliera{in_au}", None,
              "Creare l'automation in Automation Studio con gli step indicati nella scheda «Automation».")
 
 

@@ -7,6 +7,7 @@ Automations (Read/Write/Execute), List and Subscribers (Read).
 """
 from __future__ import annotations
 
+import re
 import time
 from xml.sax.saxutils import escape
 
@@ -170,8 +171,41 @@ class LiveSFMC:
             "activity_count": len(acts), "activities": activities,
         }
 
+    # ------------------------------------------------------------------ cartelle e campi
+    def _retrieve(self, object_type: str, props: list[str], filter_xml: str) -> str:
+        body = ('<RetrieveRequestMsg xmlns="http://exacttarget.com/wsdl/partnerAPI"><RetrieveRequest>'
+                f"<ObjectType>{object_type}</ObjectType>"
+                + "".join(f"<Properties>{p}</Properties>" for p in props)
+                + f"{filter_xml}</RetrieveRequest></RetrieveRequestMsg>")
+        return self._soap("Retrieve", body)
+
+    @staticmethod
+    def _simple(prop: str, value: str, tag: str = "Filter") -> str:
+        return (f'<{tag} xsi:type="SimpleFilterPart"><Property>{prop}</Property>'
+                f"<SimpleOperator>equals</SimpleOperator><Value>{escape(value)}</Value></{tag}>")
+
+    def de_fields(self, key: str) -> list[str] | None:
+        """Nomi dei campi della DE con questa External Key (None se la DE non esiste)."""
+        xml = self._retrieve("DataExtensionField", ["Name"], self._simple("DataExtension.CustomerKey", key))
+        results = re.findall(r"<Results[^>]*>(.*?)</Results>", xml, re.S)
+        if not results:
+            return None
+        return [m for r in results for m in re.findall(r"<Name>(.*?)</Name>", r, re.S)]
+
+    def find_folder(self, name: str, content_type: str) -> str:
+        """ID della cartella (Data Extensions: 'dataextension', Query: 'queryactivity'). Con un percorso
+        «A/B/C» si cerca l'ultimo livello."""
+        leaf = name.strip().strip("/").split("/")[-1].strip()
+        flt = ('<Filter xsi:type="ComplexFilterPart">' + self._simple("Name", leaf, "LeftOperand")
+               + "<LogicalOperator>AND</LogicalOperator>"
+               + self._simple("ContentType", content_type, "RightOperand") + "</Filter>")
+        ids = re.findall(r"<ID>(\d+)</ID>", self._retrieve("DataFolder", ["ID", "Name", "ContentType"], flt))
+        if not ids:
+            raise SFMCError(f"Cartella «{name}» ({content_type}) non trovata nella BU")
+        return ids[0]
+
     # ------------------------------------------------------------------ data extensions
-    def create_de(self, key: str, fields: list[dict]) -> str:
+    def create_de(self, key: str, fields: list[dict], folder: str | None = None) -> str:
         def field_xml(f):
             extra = ""
             if f["type"] == "Text":
@@ -181,8 +215,9 @@ class LiveSFMC:
             pk = "true" if f.get("pk") else "false"
             return (f"<Field><Name>{escape(f['name'])}</Name><FieldType>{f['type']}</FieldType>{extra}"
                     f"<IsPrimaryKey>{pk}</IsPrimaryKey><IsRequired>{pk}</IsRequired></Field>")
+        cat = f"<CategoryID>{self.find_folder(folder, 'dataextension')}</CategoryID>" if folder else ""
         body = (f'<CreateRequest xmlns="http://exacttarget.com/wsdl/partnerAPI"><Objects xsi:type="DataExtension">'
-                f"<CustomerKey>{escape(key)}</CustomerKey><Name>{escape(key)}</Name>"
+                f"<CustomerKey>{escape(key)}</CustomerKey><Name>{escape(key)}</Name>{cat}"
                 f"<Fields>{''.join(field_xml(f) for f in fields)}</Fields></Objects></CreateRequest>")
         self._soap("Create", body)
         return "ok"
@@ -211,9 +246,12 @@ class LiveSFMC:
         # le API restituiscono i nomi colonna in minuscolo
         return df.rename(columns={c: _canon(c) for c in df.columns})
 
-    def create_query(self, name: str, sql: str, target: str, update_type: int = 1) -> str:
+    def create_query(self, name: str, sql: str, target: str, folder: str | None = None,
+                     update_type: int = 1) -> str:
         payload = {"name": name, "key": name, "queryText": sql, "targetName": target, "targetKey": target,
                    "targetUpdateTypeId": update_type}  # 0 = overwrite, 1 = update, 2 = append
+        if folder:
+            payload["categoryId"] = int(self.find_folder(folder, "queryactivity"))
         self._req("POST", "/automation/v1/queries", json=payload)
         return "ok"
 

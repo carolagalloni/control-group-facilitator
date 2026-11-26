@@ -29,7 +29,7 @@ TYPES = [
      "description": ("Le vendite vengono caricate in una DE (import/SFTP/API). Gli aggregati sono calcolati "
                      "in SFMC da una Query Activity giornaliera: nessun dato personale esce da SFMC."),
      "fields": [{"name": "sales_de_key", "label": "External Key DE vendite", "kind": "text",
-                 "default": "Sales"}]},
+                 "default": "Sales"}, *COLUMN_FIELDS]},
     {"type": "csv", "name": "File CSV (export e-commerce/ERP)", "default": False,
      "description": ("Export delle vendite da un sistema esterno. L'app incrocia il file con la DE di "
                      "assegnazione letta da SFMC e calcola i KPI localmente."),
@@ -51,11 +51,13 @@ def _normalize(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
                cfg.get("col_key", "SubscriberKey") or "SubscriberKey": "SubscriberKey",
                cfg.get("col_date", "OrderDate") or "OrderDate": "OrderDate",
                cfg.get("col_amount", "Amount") or "Amount": "Amount"}
-    missing = [c for c in mapping if c not in df.columns]
+    # le API SFMC restituiscono i nomi colonna in minuscolo: confronto senza distinzione di maiuscole
+    by_lower = {str(c).lower(): c for c in df.columns}
+    missing = [c for c in mapping if c.lower() not in by_lower]
     if missing:
         raise ValueError(f"Colonne mancanti nella sorgente: {', '.join(missing)}. "
                          f"Colonne trovate: {', '.join(map(str, df.columns))}")
-    return df.rename(columns=mapping)
+    return df.rename(columns={by_lower[src.lower()]: dst for src, dst in mapping.items()})
 
 
 def _resolve(path: str) -> Path:
@@ -68,7 +70,7 @@ def _resolve(path: str) -> Path:
 def load_sales(ds: dict, sfmc=None) -> pd.DataFrame:
     t, cfg = ds["type"], ds.get("config", {})
     if t == "sfmc_de":
-        return sfmc.read_de(cfg.get("sales_de_key", "Sales"))
+        return _normalize(sfmc.read_de(cfg.get("sales_de_key", "Sales")), cfg)
     if t == "csv":
         p = _resolve(cfg.get("path", ""))
         if not p.is_file():

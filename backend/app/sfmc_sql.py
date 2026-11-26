@@ -54,39 +54,53 @@ def _bucket_expr(col: str, salt: str) -> str:
             f"AS BINARY(4)) AS BIGINT) % 100")
 
 
+SALES_COLUMNS = {"col_key": "SubscriberKey", "col_date": "OrderDate", "col_amount": "Amount", "col_order": "OrderID"}
+
+
+def sales_columns(cfg: dict | None) -> dict:
+    """Colonne della DE vendite come le ha la BU (mappate sui nomi standard del motore)."""
+    cfg = cfg or {}
+    return {k: (str(cfg.get(k) or "").strip() or v) for k, v in SALES_COLUMNS.items()}
+
+
 def assignment_sql(entry_de: str, assign_de: str, salt: str, holdout_pct: float, journey_key: str,
-                   touchpoint: bool) -> str:
+                   touchpoint: bool, contact_field: str = "SubscriberKey") -> str:
     threshold = round(holdout_pct * 100)
     exposure = "NULL" if touchpoint else "GETDATE()"
+    ck = f"e.[{contact_field}]"
     return f"""/* Query Activity 1 — Assegnazione deterministica al gruppo di controllo
    Target DE: {assign_de}   Azione: Update (PK SubscriberKey)
    Esegue PRIMA dell'ingresso nel journey. Hash MD5 + salt '{salt}': stesso contatto => stesso gruppo,
-   riproducibile e verificabile. Soglia: bucket < {threshold}  =>  CONTROL ({holdout_pct:.0%}). */
+   riproducibile e verificabile. Soglia: bucket < {threshold}  =>  CONTROL ({holdout_pct:.0%}).
+   Chiave del contatto nella DE di ingresso: {contact_field}. */
 SELECT
-    e.SubscriberKey,
-    CASE WHEN {_bucket_expr('e.SubscriberKey', salt)} < {threshold}
+    {ck}                                       AS SubscriberKey,
+    CASE WHEN {_bucket_expr(ck, salt)} < {threshold}
          THEN 'CONTROL' ELSE 'TREATMENT' END                AS CG_Group,
-    {_bucket_expr('e.SubscriberKey', salt)}                 AS Bucket,
+    {_bucket_expr(ck, salt)}                 AS Bucket,
     GETDATE()                                               AS AssignedDate,
     {exposure}                                              AS ExposureDate,
     '{journey_key}'                                         AS JourneyKey
 FROM [{entry_de}] e
-LEFT JOIN [{assign_de}] a ON a.SubscriberKey = e.SubscriberKey
+LEFT JOIN [{assign_de}] a ON a.SubscriberKey = {ck}
 WHERE a.SubscriberKey IS NULL   /* chi è già assegnato non cambia gruppo */
 
 /* Query Activity 1b — Propaga il flag sulla DE di ingresso (Target: {entry_de}, Azione: Update)
-SELECT e.SubscriberKey, a.CG_Group
-FROM [{entry_de}] e INNER JOIN [{assign_de}] a ON a.SubscriberKey = e.SubscriberKey */"""
+SELECT {ck}, a.CG_Group
+FROM [{entry_de}] e INNER JOIN [{assign_de}] a ON a.SubscriberKey = {ck} */"""
 
 
 def results_sql(assign_de: str, sales_de: str, results_de: str, attribution_days: int,
-                touchpoint: bool) -> str:
+                touchpoint: bool, columns: dict | None = None) -> str:
+    c = sales_columns(columns)
     exposure_filter = "WHERE a.ExposureDate IS NOT NULL" if touchpoint else ""
     exposure_col = "a.ExposureDate" if touchpoint else "a.AssignedDate"
     return f"""/* Query Activity 2 — Snapshot giornaliero dei risultati
    Target DE: {results_de}   Azione: Update (PK SnapshotDate + CG_Group)
    Finestra di attribuzione: {attribution_days} giorni dall'esposizione. Le colonne *Sq e RevenueOrders
-   servono al motore statistico per varianze e intervalli di confidenza senza leggere i dati riga per riga. */
+   servono al motore statistico per varianze e intervalli di confidenza senza leggere i dati riga per riga.
+   DE vendite {sales_de}: contatto = {c['col_key']}, data = {c['col_date']}, importo = {c['col_amount']},
+   ordine = {c['col_order']}. */
 SELECT
     CAST(GETDATE() AS DATE)                    AS SnapshotDate,
     c.CG_Group,
@@ -99,13 +113,13 @@ SELECT
     SUM(c.Revenue * c.Orders)                  AS RevenueOrders
 FROM (
     SELECT a.SubscriberKey, a.CG_Group,
-           COUNT(s.OrderID)          AS Orders,
-           ISNULL(SUM(s.Amount), 0)  AS Revenue
+           COUNT(s.[{c['col_order']}])          AS Orders,
+           ISNULL(SUM(s.[{c['col_amount']}]), 0)  AS Revenue
     FROM [{assign_de}] a
     LEFT JOIN [{sales_de}] s
-           ON s.SubscriberKey = a.SubscriberKey
-          AND s.OrderDate >= {exposure_col}
-          AND s.OrderDate <  DATEADD(DAY, {attribution_days}, {exposure_col})
+           ON s.[{c['col_key']}] = a.SubscriberKey
+          AND s.[{c['col_date']}] >= {exposure_col}
+          AND s.[{c['col_date']}] <  DATEADD(DAY, {attribution_days}, {exposure_col})
     {exposure_filter}
     GROUP BY a.SubscriberKey, a.CG_Group
 ) c

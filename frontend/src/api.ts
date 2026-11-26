@@ -65,6 +65,23 @@ export interface Journey {
   folder?: string | null;
   last_modified?: string | null;
   channels?: string[];
+  entry_de?: string;
+  entry_event_key?: string;
+}
+
+export interface JourneyLink { entry_de: string; contact_field: string; entry_event_key: string }
+export interface SfmcLink {
+  de_folder: string;
+  query_folder: string;
+  automation_folder: string;
+  journeys: Record<string, JourneyLink>;
+}
+export interface LinkCheck { item: string; status: 'ok' | 'warning' | 'error' | 'unverified'; message: string }
+export interface LinkCheckResponse {
+  verifiable: boolean;
+  ok: boolean;
+  checks: LinkCheck[];
+  resolved: Record<string, JourneyLink & { de_folder: string; query_folder: string; automation_folder: string }>;
 }
 
 export interface JourneyQuery {
@@ -173,6 +190,7 @@ export interface ControlGroupCreate {
   data_source: DataSource;
   guardrails: Guardrails;
   category?: string;
+  sfmc_link?: SfmcLink;
 }
 
 export interface InitiativeCreate extends Omit<ControlGroupCreate, 'journey_id'> {
@@ -442,6 +460,8 @@ export const api = {
   narrative: (id: string) => request<NarrativeResponse>('POST', `/control-groups/${encodeURIComponent(id)}/narrative`),
   dataSourceTypes: () => request<DataSourceType[]>('GET', '/datasources/types'),
   testDataSource: (ds: DataSource) => request<DataSourceTest>('POST', '/datasources/test', ds),
+  checkLink: (body: { journey_ids: string[]; sfmc_link: SfmcLink; data_source: DataSource }) =>
+    request<LinkCheckResponse>('POST', '/sfmc/check-link', body),
   upload: (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
